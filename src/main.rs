@@ -1,9 +1,8 @@
-mod game_object;
-mod vector2;
-mod map;
 mod game;
+mod game_object;
+mod map;
+mod vector2;
 
-fn main() 
-{
+fn main() {
     crate::game::run();
 }

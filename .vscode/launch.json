@@ -2,13 +2,13 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug executable 'rust_game'",
+            "name": "Debug executable 'my_dear'",
             "type": "lldb",
             "request": "launch",
             "cargo": {
                 "args": [
                     "run",
-                    "--bin=rust_game"
+                    "--bin=my_dear"
                 ]
             },
             "args": []

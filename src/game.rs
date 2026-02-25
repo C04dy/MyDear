@@ -1,3 +1,4 @@
+use rand::prelude::*;
 use colored::*;
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -17,6 +18,8 @@ use std::time::Duration;
 pub enum GameState {
     Normal = 0,
     Dialogue = 1,
+    Cutscene = 2,
+    Fight = 3,
 }
 pub struct Game {
     pub player: GameObject,
@@ -34,15 +37,17 @@ pub fn run() -> io::Result<()> {
     let mut game: Game = Game {
         player: GameObject::new(
             String::from("Player"),
-            Vector2::new(20, 15),
+            Vector2::new(6, 5),
             String::from("♥︎"),
             GameObjectType::PLAYER,
             CustomColor::new(255, 0, 0),
+            GameObjectStats::new(1, 1)
         ),
         map: Map::new(
             Vector2::new(500, 500),
             String::from("○"),
             CustomColor::new(0, 255, 0),
+            vec![String::from("Fight"), String::from("Run")],
         ),
         camera: Vector2::zero(),
         screen_size: Vector2::new(50, 20),
@@ -50,7 +55,6 @@ pub fn run() -> io::Result<()> {
         game_state: GameState::Normal,
         audio_manager: generate_audio_manager().expect("Failed to initialize audio"),
     };
-
     game.player.meta_data.insert(
         "CeilingIDPlayerIsOnBelow".to_string(),
         GameObjectMetaData::INT(-1),
@@ -62,24 +66,21 @@ pub fn run() -> io::Result<()> {
         String::from("1"),
         GameObjectType::MOVEABLE,
         CustomColor::new(255, 255, 255),
+        GameObjectStats::empty(),
     );
     game.map.insert_object(moveable_box);
 
-    let mut npc: GameObject = GameObject::new(
-        String::from("NPC"),
+    let mut enemy: GameObject = GameObject::new(
+        String::from("Enemy"),
         Vector2::new(3, 3),
         String::from("♥︎"),
         GameObjectType::STATIC,
-        CustomColor::new(0, 0, 255),
+        CustomColor::new(180, 0, 0),
+        GameObjectStats::new(1, 2),
     );
-    npc.add_dialogue(
-        "Select one",
-        vec![String::from("this"), String::from("or this")],
-        vec![1, 2],
-    );
-    npc.add_dialogue("You selected this", vec![], vec![]);
-    npc.add_dialogue("You selected or this", vec![], vec![]);
-    game.map.insert_object(npc);
+    enemy.add_event(EventType::Fight);
+
+    game.map.insert_object(enemy);
 
     for y in 0..9 {
         for x in 0..13 {
@@ -92,6 +93,7 @@ pub fn run() -> io::Result<()> {
                 String::from("#"),
                 GameObjectType::STATIC,
                 CustomColor::new(255, 255, 255),
+                GameObjectStats::empty(),
             );
             game.map.insert_object(wall);
         }
@@ -104,10 +106,22 @@ pub fn run() -> io::Result<()> {
                 String::from("█"),
                 GameObjectType::CEILING,
                 CustomColor::new(0, 0, 255),
+                GameObjectStats::empty(),
             );
             ceiling.set_ceiling_group_id(0);
             game.map.insert_object(ceiling);
         }
+    }
+
+
+    if let Some(ceiling) = game.map.get_ceiling_from_position(game.player.position) {
+        game.player
+            .meta_data
+            .entry("CeilingIDPlayerIsOnBelow".to_string())
+            .and_modify(|metadata| {
+                *metadata = GameObjectMetaData::INT(ceiling.get_ceiling_group_id())
+            })
+            .or_insert(GameObjectMetaData::INT(ceiling.get_ceiling_group_id()));
     }
 
     let mut frame_number: i32 = 0;
@@ -150,26 +164,22 @@ fn generate_audio_manager() -> Result<AudioManager, Box<dyn std::error::Error>> 
 
 fn process_input(direction_x: i32, direction_y: i32, game: &mut Game) {
     if game.game_state == GameState::Dialogue {
-        
-        let Some(object) = game
-            .map
-            .objects
-            .get_mut(&game.map.current_dialogue_position)
-        else {
+        let Some(object) = game.map.objects.get_mut(&game.map.current_event_position) else {
+            return;
+        };
+        let Some(event) = object.events.get_mut(object.current_event_index) else {
             return;
         };
 
-        let mut dialogue_object: &mut GameObject = object;
-
         match direction_x {
             -1 => {
-                if dialogue_object.get_current_dialogue_selections_length() == 0 {
+                if event.get_current_dialogue_selections_length() == 0 {
                     return;
                 }
-                dialogue_object.current_dialogue_selection_index =
-                    ((dialogue_object.current_dialogue_selection_index as i32) - 1).clamp(
+                event.current_dialogue_selection_index =
+                    ((event.current_dialogue_selection_index as i32) - 1).clamp(
                         0,
-                        (dialogue_object.get_current_dialogue_selections_length() as i32) - 1,
+                        (event.get_current_dialogue_selections_length() as i32) - 1,
                     ) as usize
             }
             0 => {
@@ -177,31 +187,69 @@ fn process_input(direction_x: i32, direction_y: i32, game: &mut Game) {
                     return;
                 }
 
-                if dialogue_object.get_current_dialogue_selections_length() == 0 {
+                if event.get_current_dialogue_selections_length() == 0 {
                     game.game_state = GameState::Normal;
-                    //dialogue_object.current_dialogue_index += 1;
                     return;
                 }
 
-                let next_dialogue_index =
-                    dialogue_object.get_current_dialogue_selections_pointing_index();
+                let next_dialogue_index = event.get_current_dialogue_selections_pointing_index();
+
                 if next_dialogue_index == -1 {
                     game.game_state = GameState::Normal;
-                    //dialogue_object.current_dialogue_index += 1;
                     return;
                 }
 
-                dialogue_object.current_dialogue_index = next_dialogue_index as usize
+                event.current_dialogue_index = next_dialogue_index as usize
             }
             1 => {
-                if dialogue_object.get_current_dialogue_selections_length() == 0 {
+                if event.get_current_dialogue_selections_length() == 0 {
                     return;
                 }
-                dialogue_object.current_dialogue_selection_index =
-                    (dialogue_object.current_dialogue_selection_index + 1).clamp(
-                        0,
-                        dialogue_object.get_current_dialogue_selections_length() - 1,
-                    )
+                event.current_dialogue_selection_index = (event.current_dialogue_selection_index
+                    + 1)
+                .clamp(0, event.get_current_dialogue_selections_length() - 1)
+            }
+            _ => {}
+        }
+        return;
+    } else if game.game_state == GameState::Fight {
+        let Some(enemy) = game.map.objects.get(&game.map.current_event_position) else {
+            return;
+        };
+
+        match direction_x {
+            -1 => {
+                game.map.current_fight_selection_index =
+                    ((game.map.current_fight_selection_index as i32) - 1)
+                        .clamp(0, (game.map.fight_selections.len() as i32) - 1)
+                        as usize
+            }
+            0 => {
+                if direction_y != 0 {
+                    return;
+                }
+
+                match game.map.current_fight_selection_index {
+                    0 => { // Fight
+                        
+                    }
+                    1 => { // Run
+                        if game.player.stat.agility <= enemy.stat.agility && rand::random_range(1..101) > 35 {
+                            game.map.fight_move_queue = 1;
+                            return;
+                        }
+                        
+                        game.game_state = GameState::Normal;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            1 => {
+                game.map.current_fight_selection_index =
+                    ((game.map.current_fight_selection_index as i32) + 1)
+                        .clamp(0, (game.map.fight_selections.len() as i32) - 1)
+                        as usize
             }
             _ => {}
         }
@@ -210,11 +258,16 @@ fn process_input(direction_x: i32, direction_y: i32, game: &mut Game) {
 
     if direction_x == 0
         && direction_y == 0
-        && game
+        && let Some(event) = game
             .map
-            .trigger_if_there_is_dialogue_at_this_position(game.player.position)
+            .get_if_there_is_event_at_this_position(game.player.position)
     {
-        game.game_state = GameState::Dialogue
+        match event.event_type {
+            EventType::Dialogue => game.game_state = GameState::Dialogue,
+            EventType::Fight => {
+                game.game_state = GameState::Fight;
+            }
+        }
     }
 
     let next_x = game.player.position.x + direction_x;
@@ -224,10 +277,7 @@ fn process_input(direction_x: i32, direction_y: i32, game: &mut Game) {
         return;
     }
 
-    if let Some(object) = game
-        .map
-        .get_object_from_position(Vector2::new(next_x, next_y))
-    {
+    if let Some(object) = game.map.objects.get(&Vector2::new(next_x, next_y)) {
         match object.object_type {
             GameObjectType::STATIC => return,
             GameObjectType::MOVEABLE => {
@@ -281,9 +331,55 @@ fn process_input(direction_x: i32, direction_y: i32, game: &mut Game) {
 fn render(game: &Game) {
     let mut dialogue_rendered: bool = false;
     let mut dialogue_selection_rendered: bool = false;
+    let mut rendered_fight_selections: bool = false;
 
     for y in 0..game.screen_size.y {
         for x in 0..game.screen_size.x {
+            match game.game_state {
+                GameState::Normal => {}
+                GameState::Fight => {
+                    if y == game.screen_size.y / 2 {
+                        if x == game.screen_margins.x {
+                            print!("{}", game.player.icon);
+                        } else if x == game.screen_size.x - game.screen_margins.x {
+                            if let Some(enemy) =
+                                game.map.objects.get(&game.map.current_event_position)
+                            {
+                                print!("{}", enemy.icon);
+                            }
+                        } else {
+                            print!(" ");
+                        }
+                    } else if y == game.screen_size.y - 5 {
+                        print_fight_padding();
+                    } else if y == game.screen_size.y - 4 && !rendered_fight_selections {
+                        let selections = &game.map.fight_selections;
+
+                        let output: String = selections
+                            .iter()
+                            .enumerate()
+                            .map(|(i, text)| {
+                                if i == game.map.current_fight_selection_index {
+                                    text.custom_color(CustomColor::new(255, 0, 0)).to_string()
+                                } else {
+                                    text.to_string()
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+
+                        print!("{}", output);
+
+                        rendered_fight_selections = true;
+                    } else {
+                        print!(" ");
+                    }
+                    continue;
+                }
+                GameState::Cutscene => {}
+                GameState::Dialogue => {}
+            }
+
             let current_point = get_point_from_world_to_screen(&game.camera, &Vector2::new(x, y));
             if current_point.x > game.map.map_size.x
                 || current_point.x < 0
@@ -302,41 +398,41 @@ fn render(game: &Game) {
                 && !matches!(game.player.meta_data.get("CeilingIDPlayerIsOnBelow"), Some(GameObjectMetaData::INT(id)) if *id == ceiling.get_ceiling_group_id())
             {
                 print!("{}", ceiling.icon);
-            } else if let Some(object) = game.map.get_object_from_position(current_point) {
+            } else if let Some(object) = game.map.objects.get(&current_point) {
                 print!("{}", object.icon);
             } else {
                 print!("{}", game.map.ground_icon);
             }
         }
 
-        print!("{}", " ".repeat(5));
-        print!("|   ");
-
         match game.game_state {
             GameState::Normal => {}
+            GameState::Fight => {}
+            GameState::Cutscene => {}
             GameState::Dialogue => 'dialogue: {
-                let Some(object) = game
-                    .map
-                    .get_object_from_position(game.map.current_dialogue_position)
-                else {
+                print_dialogue_padding();
+                let Some(object) = game.map.objects.get(&game.map.current_event_position) else {
+                    break 'dialogue;
+                };
+
+                let Some(event) = object.events.get(object.current_event_index) else {
                     break 'dialogue;
                 };
 
                 if !dialogue_rendered {
-                    print!("{}", object.get_current_dialogue_text());
+                    print!("{}", event.get_current_dialogue_text());
                     dialogue_rendered = true;
                     break 'dialogue;
                 }
 
                 if !dialogue_selection_rendered {
-                    let selections = object.get_current_dialogue_selections();
-                    let selected_idx = object.current_dialogue_selection_index as usize;
+                    let selections = event.get_current_dialogue_selections();
 
                     let output: String = selections
                         .iter()
                         .enumerate()
                         .map(|(i, text)| {
-                            if i == selected_idx {
+                            if i == event.current_dialogue_selection_index {
                                 text.custom_color(CustomColor::new(255, 0, 0)).to_string()
                             } else {
                                 text.to_string()
@@ -352,6 +448,15 @@ fn render(game: &Game) {
         }
         print!("\r\n");
     }
+}
+
+fn print_dialogue_padding() {
+    print!("{}", " ".repeat(5));
+    print!("|   ");
+}
+
+fn print_fight_padding() {
+    print!("{}", "_");
 }
 
 fn get_point_from_world_to_screen(game_origin: &Vector2, screen_coordinate: &Vector2) -> Vector2 {
