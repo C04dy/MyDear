@@ -4,5 +4,8 @@ mod map;
 mod vector2;
 
 fn main() {
-    crate::game::run();
+    if let Err(e) = crate::game::run() {
+        eprintln!("Game exited with error: {}", e);
+        std::process::exit(1);
+    }
 }
