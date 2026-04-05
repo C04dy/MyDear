@@ -945,10 +945,12 @@ impl Renderer {
 
     #[cfg(not(feature = "editor"))]
     pub fn render(&mut self, map: &Map, camera: &Vector2, state: &GameState) {
-        let Some(cam) = map.objects.get(&map.camera_operator) else {
-            return;
-        };
-        print!("{}\r\n", cam.position);
+        if cfg!(debug_assertions) {
+            let Some(cam) = map.objects.get(&map.camera_operator) else {
+                return;
+            };
+            print!("{}\r\n", cam.position);
+        }
 
         let mut buffer = String::with_capacity(
             (self.measurements.screen_size.x * self.measurements.screen_size.y * 15) as usize,

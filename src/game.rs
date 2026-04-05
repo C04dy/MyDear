@@ -1,5 +1,5 @@
 use colored::*;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, KeyCode};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use crossterm::{cursor, execute, terminal};
 use rand;
@@ -586,9 +586,10 @@ pub fn run() -> io::Result<()> {
         game.tick(delta_ms);
 
         if event::poll(Duration::from_millis(0))?
-            && let Event::Key(key_event) = event::read()?
+            && let Ok(key_event) = event::read()
         {
-            if game.process_input(key_event.code) == false && key_event.kind == KeyEventKind::Press
+            if let Some(event) = key_event.as_key_press_event()
+                && game.process_input(event.code) == false
             {
                 break;
             }

@@ -11,7 +11,7 @@ use crate::{
 use colored::*;
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{self, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{self, disable_raw_mode, enable_raw_mode},
 };
@@ -1419,9 +1419,11 @@ pub fn run() -> io::Result<()> {
         stdout.flush()?;
 
         if event::poll(Duration::from_millis(0))?
-            && let Event::Key(key_event) = event::read()?
+            && let Ok(key_event) = event::read()
         {
-            if editor.process_input(key_event) == false && key_event.kind == KeyEventKind::Press {
+            if let Some(event) = key_event.as_key_press_event()
+                && editor.process_input(event) == false
+            {
                 break;
             }
         }
