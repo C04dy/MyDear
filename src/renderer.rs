@@ -156,6 +156,8 @@ impl Renderer {
                     self.pad_line(&mut buffer, 4, len);
                     buffer.push_str("\r\n");
 
+                    buffer.push_str(&file_message);
+                    len = file_message.len();
                     self.pad_line(&mut buffer, 5, len);
                     buffer.push_str("\r\n");
 
@@ -169,6 +171,7 @@ impl Renderer {
                             buffer.push_str(&path);
                         }
                         self.pad_line(&mut buffer, 6 + i, len);
+                        buffer.push_str("\r\n");
                     }
                 } else {
                     buffer.push_str(&format!("location: {}", file_input));

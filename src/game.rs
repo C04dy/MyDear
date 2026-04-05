@@ -1,9 +1,10 @@
 use colored::*;
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use crossterm::{cursor, execute, terminal};
 use rand;
 use std::io::{Write, stdout};
+use std::panic;
 use std::path::Path;
 use std::{env, i32, io};
 
@@ -516,7 +517,23 @@ fn generate_audio_manager() -> Result<AudioManager, Box<dyn std::error::Error>> 
     Ok(manager)
 }
 
+fn handle_crash(info: &panic::PanicHookInfo) {
+    let mut stdout = stdout();
+    let _ = execute!(stdout, cursor::MoveTo(0, 0));
+    let _ = stdout.flush();
+    let _ = execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show);
+    let _ = disable_raw_mode();
+    println!("Something went wrong");
+    if let Some(s) = info.payload().downcast_ref::<&str>() {
+        println!("Cause: {}", s);
+    }
+}
+
 pub fn run() -> io::Result<()> {
+    panic::set_hook(Box::new(|info| {
+        handle_crash(info);
+    }));
+
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
@@ -557,7 +574,9 @@ pub fn run() -> io::Result<()> {
 
         execute!(stdout, cursor::MoveTo(0, 0))?;
 
-        print!("{}\r\n", frame_number);
+        if cfg!(debug_assertions) {
+            print!("{}\r\n", frame_number);
+        }
         frame_number += 1;
 
         game.renderer.render(&game.map, &game.camera, &game.state);
@@ -567,9 +586,10 @@ pub fn run() -> io::Result<()> {
         game.tick(delta_ms);
 
         if event::poll(Duration::from_millis(0))?
-            && let Event::Key(KeyEvent { code, .. }) = event::read()?
+            && let Event::Key(key_event) = event::read()?
         {
-            if game.process_input(code) == false {
+            if game.process_input(key_event.code) == false && key_event.kind == KeyEventKind::Press
+            {
                 break;
             }
         }

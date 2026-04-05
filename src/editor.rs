@@ -11,15 +11,15 @@ use crate::{
 use colored::*;
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{self, disable_raw_mode, enable_raw_mode},
 };
-use std::time::Duration;
 use std::{
     io::{self, Write, stdout},
     path::Path,
 };
+use std::{panic, time::Duration};
 
 pub const OBJECT_EDIT_SELECTIONS: &[&str] =
     &["Position", "Icon", "Color", "Components", "Camera Operator"];
@@ -148,13 +148,14 @@ impl Editor {
         }
     }
 
-    fn save(&self) {
-        let _ = save_map(
+    fn save(&self) -> std::io::Result<()> {
+        save_map(
             &map_to_data(&self.map),
             &self.current_folder,
             &self.current_map,
-        );
-        let _ = save_measurements(&self.renderer.measurements, &self.current_folder);
+        )?;
+        save_measurements(&self.renderer.measurements, &self.current_folder)?;
+        Ok(())
     }
 
     fn open_project(&mut self, path: &str) -> bool {
@@ -221,10 +222,23 @@ impl Editor {
                         } else {
                             std::fs::create_dir_all(path).is_ok()
                         };
+
                         if can_create {
                             self.current_folder = input.clone() + "/";
+                            self.current_map = String::from("map.ron");
+                            match self.save() {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    if let EditorState::SelectingFile { file_message, .. } =
+                                        &mut self.state
+                                    {
+                                        *file_message = format!("Couldnt Create Project: {}", e);
+                                    }
+                                    return true;
+                                }
+                            }
+
                             add_recent_project(&input);
-                            self.save();
                             self.renderer.set_editor_message(BROSWING_MESSAGE);
                             self.state = EditorState::Browsing {
                                 cursor: Vector2::new(
@@ -352,9 +366,17 @@ impl Editor {
                             );
                         }
                     }
-                    KeyCode::Char('s') => {
-                        self.save();
-                    }
+                    KeyCode::Char('s') => match self.save() {
+                        Ok(_) => {}
+                        Err(e) => {
+                            if let EditorState::SelectingFile { file_message, .. } = &mut self.state
+                            {
+                                self.renderer.editor_message =
+                                    format!("Couldnt Save Project: {}", e);
+                            }
+                            return true;
+                        }
+                    },
                     KeyCode::Char('m') => {
                         self.renderer
                             .set_editor_message(EDITING_MEASUREMENTS_MESSAGE);
@@ -1359,7 +1381,23 @@ pub fn get_event_field_count(map: &Map, object_id: GameObjectID, current_step: u
     }
 }
 
+fn handle_crash(info: &panic::PanicHookInfo) {
+    let mut stdout = stdout();
+    let _ = execute!(stdout, cursor::MoveTo(0, 0));
+    let _ = stdout.flush();
+    let _ = execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show);
+    let _ = disable_raw_mode();
+    println!("Something went wrong");
+    if let Some(s) = info.payload().downcast_ref::<&str>() {
+        println!("Cause: {}", s);
+    }
+}
+
 pub fn run() -> io::Result<()> {
+    panic::set_hook(Box::new(|info| {
+        handle_crash(info);
+    }));
+
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, terminal::EnterAlternateScreen, cursor::Hide)?;
@@ -1383,7 +1421,7 @@ pub fn run() -> io::Result<()> {
         if event::poll(Duration::from_millis(0))?
             && let Event::Key(key_event) = event::read()?
         {
-            if editor.process_input(key_event) == false {
+            if editor.process_input(key_event) == false && key_event.kind == KeyEventKind::Press {
                 break;
             }
         }
