@@ -10,6 +10,8 @@ mod game_object;
 mod level;
 mod map;
 mod renderer;
+#[cfg(feature = "editor")]
+mod utils;
 mod vector2;
 
 fn main() {

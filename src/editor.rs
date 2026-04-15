@@ -1,11 +1,15 @@
 use crate::{
-    game_object::{EventCondition, EventStep, GameEvent, GameObjectID, StatsComponent},
+    game_object::{
+        Combat, CombatPhase, Dialogue, EventComponent, EventCondition, EventStep, GameEvent,
+        GameObjectID, StatsComponent,
+    },
     level::{
         add_recent_project, data_to_map, load_map, load_measurements, load_recent_projects,
         map_to_data, remove_recent_project, save_map, save_measurements,
     },
     map::Map,
     renderer::{Renderer, ScreenMeasurements},
+    utils::{wrap_add, wrap_add_reverse, wrap_remove},
     vector2::Vector2,
 };
 use colored::*;
@@ -16,51 +20,22 @@ use crossterm::{
     terminal::{self, disable_raw_mode, enable_raw_mode},
 };
 use std::{
+    any::Any,
+    collections::HashMap,
+    i32,
     io::{self, Write, stdout},
     path::Path,
+    u8, usize,
 };
 use std::{panic, time::Duration};
 
-pub const OBJECT_EDIT_SELECTIONS: &[&str] =
-    &["Position", "Icon", "Color", "Components", "Camera Operator"];
 pub const FILE_SELECTIONS: &[&str] = &["New Project", "Open Project", "Recent Projects"];
-pub const COMPONENT_SELECTIONS: &[&str] = &[
-    "MoveableComponent",
-    "InputComponent",
-    "EventComponent",
-    "StatsComponent",
-];
-pub const STATS_COMPONENT_SELECTIONS: &[&str] =
-    &["strength", "agility", "defense", "luck", "max_health"];
-pub const EDIT_SCREEN_MEASUREMENTS_SELECTIONS: &[&str] = &[
-    "screen_size",
-    "screen_margins",
-    "dialogue_padding",
-    "dialogue_text_padding",
-    "dialogue_selection_text_padding",
-    "dialogue_max_character_count",
-    "combat_character_padding_y",
-    "combat_character_padding_x",
-    "combat_characters_distance",
-    "combat_separator_padding_y",
-    "combat_selection_separator_padding",
-    "combat_health_padding_y",
-];
-
 pub const BROSWING_MESSAGE: &str =
     "←↑→↓:Move, e:Insert/Edit object, s:Save, CTRL+q:Quit, m:Edit screen measurements";
-pub const EDITING_OBJECT_MESSAGE: &str =
-    "↑↓:Move selection, ENTER:Select/DeSelect property, DELETE:Delete Object, ESC:Go back";
-pub const EDITING_COMPONENT_MESSAGE: &str =
-    "↑↓:Move selection, ENTER:Add component, DELETE:Remove component, ESC:Go back";
-pub const EDITING_STATS_COMPONENT_MESSAGE: &str = "↑↓:Move selection, ←→:Change value, ESC:Go back";
-pub const EDITING_EVENT_COMPONENT_MESSAGE: &str = "↑↓:Move selection, ←→:Change value, ENTER:Edit event, +:Add EventStep, DELETE:Delete EventStep, ESC:Go back";
-pub const EDITING_EVENT_MESSAGE: &str =
-    "↑↓:Move selection, ←→:Change value, ENTER:Edit, ESC:Go back";
-pub const EDITING_EVENT_MESSAGE_DIALOGUE: &str = "↑↓:Move selection, ←→:Change value, ENTER:Edit, +:Add selection, -:Remove selection, ESC:Go back";
-pub const EDITING_MEASUREMENTS_MESSAGE: &str =
-    "↑↓:Move selection, ←→:Change value, ENTER:Select/DeSelect property, ESC:Go back";
+pub const EDITING_MESSAGE: &str =
+    "←↑→↓:Move selection, ENTER:Select/DeSelect property, ESC:Go back, BACKSPACE:DeSelect property";
 
+#[derive(Clone)]
 pub enum EditorState {
     SelectingFile {
         file_selection: usize,
@@ -69,40 +44,15 @@ pub enum EditorState {
         recent_projects: Vec<String>,
         recent_selection: usize,
     },
-    Browsing {
-        cursor: Vector2,
-    },
-    EditingMeasurements {
-        selection: usize,
-        selections_selection: usize,
-        selected: bool,
-    },
-    EditingObject {
-        object_id: GameObjectID,
-        selection: usize,
-        edit_selection: usize,
-        selected: bool,
-    },
-    SelectingComponent {
-        object_id: GameObjectID,
-        selection: usize,
-    },
-    EditingEventComponent {
-        object_id: GameObjectID,
-        current_step: usize,
-        selection: usize,
-    },
-    EditingEvent {
-        object_id: GameObjectID,
-        current_step: usize,
-        selection: usize,
-        editing_selection: bool,
-        selections_selection: usize,
-    },
-    EditingStatsComponent {
-        object_id: GameObjectID,
-        selection: usize,
-    },
+    Browsing,
+    EditingMeasurements,
+    EditingObject(GameObjectID),
+    SelectingComponent(GameObjectID),
+    EditingEventComponent(GameObjectID),
+    EditingDialogueEvent(GameObjectID, usize /* event id */),
+    EditingTriggerObjectEvent(GameObjectID, usize /* event id */),
+    EditingCombatEvent(GameObjectID, usize /* event id */),
+    EditingStatsComponent(GameObjectID),
 }
 
 pub struct Editor {
@@ -110,6 +60,7 @@ pub struct Editor {
     pub camera: Vector2,
     pub renderer: Renderer,
     pub state: EditorState,
+    pub layout: Layout,
     current_folder: String,
     current_map: String,
 }
@@ -143,6 +94,7 @@ impl Editor {
                 recent_projects: load_recent_projects().paths,
                 recent_selection: 0,
             },
+            layout: Layout::new(),
             current_folder: "".to_string(),
             current_map: "".to_string(),
         }
@@ -185,13 +137,7 @@ impl Editor {
         self.current_folder = folder;
         self.current_map = String::from("map.ron");
         add_recent_project(path);
-        self.renderer.set_editor_message(BROSWING_MESSAGE);
-        self.state = EditorState::Browsing {
-            cursor: Vector2::new(
-                self.renderer.measurements.screen_size.x / 2,
-                self.renderer.measurements.screen_size.y / 2,
-            ),
-        };
+        self.change_state(EditorState::Browsing);
         return true;
     }
 
@@ -239,13 +185,7 @@ impl Editor {
                             }
 
                             add_recent_project(&input);
-                            self.renderer.set_editor_message(BROSWING_MESSAGE);
-                            self.state = EditorState::Browsing {
-                                cursor: Vector2::new(
-                                    self.renderer.measurements.screen_size.x / 2,
-                                    self.renderer.measurements.screen_size.y / 2,
-                                ),
-                            };
+                            self.change_state(EditorState::Browsing);
                         } else {
                             if let EditorState::SelectingFile { file_message, .. } = &mut self.state
                             {
@@ -277,7 +217,9 @@ impl Editor {
                 return true;
             }
         }
-
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
+            return false;
+        }
         match &mut self.state {
             EditorState::SelectingFile {
                 file_selection,
@@ -339,7 +281,7 @@ impl Editor {
                     _ => {}
                 }
             }
-            EditorState::Browsing { cursor } => {
+            EditorState::Browsing => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
                     return false;
                 }
@@ -350,15 +292,10 @@ impl Editor {
                     KeyCode::Right => self.camera.x += 1,
                     KeyCode::Delete => {}
                     KeyCode::Char('e') => {
-                        let current_pos = self.camera + *cursor;
+                        let current_pos =
+                            self.camera + (self.renderer.measurements.screen_size / 2);
                         if let Some(object_id) = self.map.positions_hashmap.get(&current_pos) {
-                            self.renderer.set_editor_message(EDITING_OBJECT_MESSAGE);
-                            self.state = EditorState::EditingObject {
-                                object_id: *object_id,
-                                selection: 0,
-                                edit_selection: 0,
-                                selected: false,
-                            }
+                            self.change_state(EditorState::EditingObject(*object_id));
                         } else {
                             self.map.insert_object(
                                 current_pos,
@@ -369,8 +306,7 @@ impl Editor {
                     KeyCode::Char('s') => match self.save() {
                         Ok(_) => {}
                         Err(e) => {
-                            if let EditorState::SelectingFile { file_message, .. } = &mut self.state
-                            {
+                            if let EditorState::SelectingFile { .. } = &mut self.state {
                                 self.renderer.editor_message =
                                     format!("Couldnt Save Project: {}", e);
                             }
@@ -378,1006 +314,371 @@ impl Editor {
                         }
                     },
                     KeyCode::Char('m') => {
-                        self.renderer
-                            .set_editor_message(EDITING_MEASUREMENTS_MESSAGE);
-                        self.state = EditorState::EditingMeasurements {
-                            selection: 0,
-                            selections_selection: 0,
-                            selected: false,
-                        }
+                        self.change_state(EditorState::EditingMeasurements);
                     }
                     _ => {}
                 }
             }
-            EditorState::EditingObject {
-                object_id,
-                selection,
-                edit_selection,
-                selected,
-            } => match key.code {
+            _ => match key.code {
                 KeyCode::Up => {
-                    if *selected {
-                        match OBJECT_EDIT_SELECTIONS[*selection] {
-                            "Position" => {
-                                self.map.change_object_position(
-                                    *object_id,
-                                    Vector2::new(
-                                        self.map.objects.get(object_id).unwrap().position.x,
-                                        self.map.objects.get(object_id).unwrap().position.y - 1,
-                                    ),
-                                );
-                            }
-                            "Color" => {
-                                if let Some(object) = self.map.objects.get_mut(object_id) {
-                                    if let Some(Color::TrueColor { r, g, b }) =
-                                        &mut object.icon.fgcolor
-                                    {
-                                        match *edit_selection {
-                                            0 => *r = r.wrapping_add(1),
-                                            1 => *g = g.wrapping_add(1),
-                                            2 => *b = b.wrapping_add(1),
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        *selection = (*selection + OBJECT_EDIT_SELECTIONS.len() - 1)
-                            % OBJECT_EDIT_SELECTIONS.len();
-                    }
-                }
-                KeyCode::Down => {
-                    if *selected {
-                        match OBJECT_EDIT_SELECTIONS[*selection] {
-                            "Position" => {
-                                self.map.change_object_position(
-                                    *object_id,
-                                    Vector2::new(
-                                        self.map.objects.get(object_id).unwrap().position.x,
-                                        self.map.objects.get(object_id).unwrap().position.y + 1,
-                                    ),
-                                );
-                            }
-                            "Color" => {
-                                if let Some(object) = self.map.objects.get_mut(object_id) {
-                                    if let Some(Color::TrueColor { r, g, b }) =
-                                        &mut object.icon.fgcolor
-                                    {
-                                        match *edit_selection {
-                                            0 => *r = r.wrapping_sub(1),
-                                            1 => *g = g.wrapping_sub(1),
-                                            2 => *b = b.wrapping_sub(1),
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        *selection = (*selection + 1) % OBJECT_EDIT_SELECTIONS.len();
-                    }
-                }
-                KeyCode::Left => {
-                    if *selected {
-                        match OBJECT_EDIT_SELECTIONS[*selection] {
-                            "Position" => {
-                                self.map.change_object_position(
-                                    *object_id,
-                                    Vector2::new(
-                                        self.map.objects.get(object_id).unwrap().position.x - 1,
-                                        self.map.objects.get(object_id).unwrap().position.y,
-                                    ),
-                                );
-                            }
-                            "Color" => {
-                                *edit_selection = (*edit_selection + 3 - 1) % 3;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                KeyCode::Right => {
-                    if *selected {
-                        match OBJECT_EDIT_SELECTIONS[*selection] {
-                            "Position" => {
-                                self.map.change_object_position(
-                                    *object_id,
-                                    Vector2::new(
-                                        self.map.objects.get(object_id).unwrap().position.x + 1,
-                                        self.map.objects.get(object_id).unwrap().position.y,
-                                    ),
-                                );
-                            }
-                            "Color" => {
-                                *edit_selection = (*edit_selection + 1) % 3;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                KeyCode::Enter => {
-                    *selected = !*selected;
-                    *edit_selection = 0;
-                    if OBJECT_EDIT_SELECTIONS[*selection] == "Components" {
-                        self.renderer.set_editor_message(EDITING_COMPONENT_MESSAGE);
-                        self.state = EditorState::SelectingComponent {
-                            object_id: *object_id,
-                            selection: 0,
-                        }
-                    } else if OBJECT_EDIT_SELECTIONS[*selection] == "Camera Operator" {
-                        if self.map.camera_operator == *object_id {
-                            self.map.camera_operator = 0;
+                    if let Some(button) = self.layout.buttons.get_mut(&self.layout.current_button) {
+                        if button.selected {
+                            button.button_up();
                         } else {
-                            self.map.camera_operator = *object_id;
-                        }
-                        *selected = false;
-                    }
-                }
-                KeyCode::Delete => {
-                    self.map.delete_object(*object_id);
-                    self.renderer.set_editor_message(BROSWING_MESSAGE);
-                    self.state = EditorState::Browsing {
-                        cursor: Vector2::new(
-                            self.renderer.measurements.screen_size.x / 2,
-                            self.renderer.measurements.screen_size.y / 2,
-                        ),
-                    };
-                }
-                KeyCode::Esc => {
-                    self.renderer.set_editor_message(BROSWING_MESSAGE);
-                    self.state = EditorState::Browsing {
-                        cursor: Vector2::new(
-                            self.renderer.measurements.screen_size.x / 2,
-                            self.renderer.measurements.screen_size.y / 2,
-                        ),
-                    };
-                }
-                KeyCode::Char(c) => {
-                    if *selected && OBJECT_EDIT_SELECTIONS[*selection] == "Icon" {
-                        if let Some(object) = self.map.objects.get_mut(object_id) {
-                            let color = object.icon.fgcolor.clone();
-                            object.icon = c.to_string().custom_color(match color {
-                                Some(Color::TrueColor { r, g, b }) => CustomColor::new(r, g, b),
-                                _ => CustomColor::new(255, 255, 255),
-                            });
-                            *selected = false;
+                            self.layout.current_button = wrap_remove(
+                                // this is up because we render the first index first
+                                self.layout.current_button,
+                                1,
+                                self.layout.buttons.len() - 1,
+                                0,
+                            );
                         }
                     }
-                }
-                _ => {}
-            },
-            EditorState::SelectingComponent {
-                object_id,
-                selection,
-            } => match key.code {
-                KeyCode::Up => {
-                    *selection =
-                        (*selection + COMPONENT_SELECTIONS.len() - 1) % COMPONENT_SELECTIONS.len();
                 }
                 KeyCode::Down => {
-                    *selection = (*selection + 1) % COMPONENT_SELECTIONS.len();
-                }
-                KeyCode::Enter => match COMPONENT_SELECTIONS[*selection] {
-                    "MoveableComponent" => {
-                        self.map.insert_moveable_component(*object_id);
-                    }
-                    "InputComponent" => {
-                        self.map.insert_input_component(*object_id);
-                    }
-                    "StatsComponent" => {
-                        self.map
-                            .insert_stats_component(*object_id, StatsComponent::new(0, 0, 0, 0, 0));
-                        self.renderer
-                            .set_editor_message(EDITING_STATS_COMPONENT_MESSAGE);
-                        self.state = EditorState::EditingStatsComponent {
-                            object_id: *object_id,
-                            selection: 0,
+                    if let Some(button) = self.layout.buttons.get_mut(&self.layout.current_button) {
+                        if button.selected {
+                            button.button_down();
+                        } else {
+                            self.layout.current_button = wrap_add_reverse(
+                                self.layout.current_button,
+                                1,
+                                self.layout.buttons.len(),
+                            );
                         }
-                    }
-                    "EventComponent" => {
-                        self.map.insert_event_component(
-                            *object_id,
-                            vec![EventStep::new(
-                                GameEvent::None,
-                                EventCondition::None,
-                                false,
-                                None,
-                            )],
-                        );
-                        self.renderer
-                            .set_editor_message(EDITING_EVENT_COMPONENT_MESSAGE);
-                        self.state = EditorState::EditingEventComponent {
-                            object_id: *object_id,
-                            current_step: 0,
-                            selection: 0,
-                        }
-                    }
-                    _ => {}
-                },
-                KeyCode::Delete => match COMPONENT_SELECTIONS[*selection] {
-                    "MoveableComponent" => {
-                        self.map.moveable_components.remove(object_id);
-                    }
-                    "InputComponent" => {
-                        self.map.input_components.remove(object_id);
-                    }
-                    "StatsComponent" => {
-                        self.map.stats_components.remove(object_id);
-                    }
-                    "EventComponent" => {
-                        self.map.event_components.remove(object_id);
-                    }
-                    _ => {}
-                },
-                KeyCode::Esc => {
-                    self.renderer.set_editor_message(EDITING_OBJECT_MESSAGE);
-                    self.state = EditorState::EditingObject {
-                        object_id: *object_id,
-                        selection: 3,
-                        edit_selection: 0,
-                        selected: false,
-                    }
-                }
-                _ => {}
-            },
-            EditorState::EditingEventComponent {
-                object_id,
-                current_step,
-                selection,
-            } => match key.code {
-                KeyCode::Up => {
-                    let Some(event_comp) = self.map.event_components.get(object_id) else {
-                        return true;
-                    };
-                    *selection = (*selection + 5 - 1) % 5;
-                }
-                KeyCode::Down => {
-                    let Some(event_comp) = self.map.event_components.get(object_id) else {
-                        return true;
-                    };
-                    *selection = (*selection + 1) % 5;
-                }
-                KeyCode::Left => {
-                    let Some(event_comp) = self.map.event_components.get_mut(object_id) else {
-                        return true;
-                    };
-                    match selection {
-                        0 => {
-                            *current_step = (*current_step + event_comp.events.len() - 1)
-                                % event_comp.events.len();
-                        }
-                        1 => {
-                            event_comp.events[*current_step].event =
-                                event_comp.events[*current_step].event.prev()
-                        }
-                        2 => {
-                            event_comp.events[*current_step].requirement =
-                                event_comp.events[*current_step].requirement.prev()
-                        }
-                        3 => {
-                            event_comp.events[*current_step].repeat =
-                                !event_comp.events[*current_step].repeat
-                        }
-                        4 => {
-                            if let Some(id) = &mut event_comp.events[*current_step].next_event {
-                                if *id == 0 {
-                                    event_comp.events[*current_step].next_event = None;
-                                    return true;
-                                }
-                                *id -= 1;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                KeyCode::Right => {
-                    let Some(event_comp) = self.map.event_components.get_mut(object_id) else {
-                        return true;
-                    };
-                    match selection {
-                        0 => {
-                            *current_step = (*current_step + 1) % event_comp.events.len();
-                        }
-                        1 => {
-                            event_comp.events[*current_step].event =
-                                event_comp.events[*current_step].event.next()
-                        }
-                        2 => {
-                            event_comp.events[*current_step].requirement =
-                                event_comp.events[*current_step].requirement.next()
-                        }
-                        3 => {
-                            event_comp.events[*current_step].repeat =
-                                !event_comp.events[*current_step].repeat
-                        }
-                        4 => {
-                            if let Some(id) = &mut event_comp.events[*current_step].next_event {
-                                *id += 1;
-                            } else {
-                                event_comp.events[*current_step].next_event = Some(0);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                KeyCode::Esc => {
-                    self.renderer.set_editor_message(EDITING_COMPONENT_MESSAGE);
-                    self.state = EditorState::SelectingComponent {
-                        object_id: *object_id,
-                        selection: 2,
-                    }
-                }
-                KeyCode::Char('+') => {
-                    let Some(event_comp) = self.map.event_components.get_mut(object_id) else {
-                        return true;
-                    };
-                    event_comp.events.push(EventStep::new(
-                        GameEvent::None,
-                        EventCondition::None,
-                        false,
-                        None,
-                    ))
-                }
-                KeyCode::Delete => {
-                    let Some(event_comp) = self.map.event_components.get_mut(object_id) else {
-                        return true;
-                    };
-                    if event_comp.events.len() <= 1 {
-                        self.map.event_components.remove(object_id);
-                        self.renderer.set_editor_message(EDITING_COMPONENT_MESSAGE);
-                        self.state = EditorState::SelectingComponent {
-                            object_id: *object_id,
-                            selection: 2,
-                        };
-                        return true;
-                    }
-                    event_comp.events.remove(*current_step);
-                    if *current_step >= event_comp.events.len() {
-                        *current_step = event_comp.events.len() - 1;
-                    }
-                }
-                KeyCode::Enter => match selection {
-                    1 => {
-                        let Some(event_comp) = self.map.event_components.get_mut(object_id) else {
-                            return true;
-                        };
-
-                        match event_comp.events[*current_step].event {
-                            GameEvent::None => {
-                                return true;
-                            }
-                            GameEvent::Dialogue(_) => {
-                                self.renderer
-                                    .set_editor_message(EDITING_EVENT_MESSAGE_DIALOGUE);
-                            }
-                            _ => {
-                                self.renderer.set_editor_message(EDITING_EVENT_MESSAGE);
-                            }
-                        }
-
-                        self.state = EditorState::EditingEvent {
-                            object_id: *object_id,
-                            current_step: *current_step,
-                            selection: 0,
-                            editing_selection: false,
-                            selections_selection: 0,
-                        }
-                    }
-                    _ => {}
-                },
-                _ => {}
-            },
-            EditorState::EditingEvent {
-                object_id,
-                current_step,
-                selection,
-                editing_selection,
-                selections_selection,
-            } => match key.code {
-                KeyCode::Up => {
-                    if *editing_selection {
-                        let Some(event_comp) = self.map.event_components.get_mut(object_id) else {
-                            return true;
-                        };
-                        match &mut event_comp.events[*current_step].event {
-                            GameEvent::Combat(combat) => {
-                                if let Some(Color::TrueColor { r, g, b }) =
-                                    &mut combat.projectile_icon.fgcolor
-                                {
-                                    match *selections_selection {
-                                        0 => *r = r.wrapping_add(1),
-                                        1 => *g = g.wrapping_add(1),
-                                        2 => *b = b.wrapping_add(1),
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            GameEvent::Dialogue(dialogue) => {
-                                if *selection == 2 {
-                                    if let Some(ref mut i) =
-                                        dialogue.selections_pointing_event[*selections_selection]
-                                    {
-                                        *i += 1;
-                                    } else {
-                                        dialogue.selections_pointing_event[*selections_selection] =
-                                            Some(0)
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                        return true;
-                    }
-                    let len = get_event_field_count(&self.map, *object_id, *current_step);
-                    *selection = (*selection + len - 1) % len;
-                }
-                KeyCode::Down => {
-                    if *editing_selection {
-                        let Some(event_comp) = self.map.event_components.get_mut(object_id) else {
-                            return true;
-                        };
-                        match &mut event_comp.events[*current_step].event {
-                            GameEvent::Combat(combat) => {
-                                if let Some(Color::TrueColor { r, g, b }) =
-                                    &mut combat.projectile_icon.fgcolor
-                                {
-                                    match *selections_selection {
-                                        0 => *r = r.wrapping_sub(1),
-                                        1 => *g = g.wrapping_sub(1),
-                                        2 => *b = b.wrapping_sub(1),
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            GameEvent::Dialogue(dialogue) => {
-                                if *selection == 2 {
-                                    if let Some(ref mut i) =
-                                        dialogue.selections_pointing_event[*selections_selection]
-                                    {
-                                        if *i == 0 {
-                                            dialogue.selections_pointing_event
-                                                [*selections_selection] = None;
-                                            return true;
-                                        }
-                                        *i -= 1;
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                        return true;
-                    }
-                    let len = get_event_field_count(&self.map, *object_id, *current_step);
-                    *selection = (*selection + 1) % len;
-                }
-                KeyCode::Right => {
-                    if *editing_selection {
-                        *selections_selection = (*selections_selection + 1) % 3;
-                        return true;
-                    }
-                    let Some(event_comp) = self.map.event_components.get_mut(object_id) else {
-                        return true;
-                    };
-                    let event = &mut event_comp.events[*current_step];
-                    match &mut event.event {
-                        GameEvent::Combat(combat) => match *selection {
-                            0 => combat.player_goes_first = !combat.player_goes_first,
-                            1 => combat.turn_result_time += 1,
-                            4 => combat.projectile_damage += 1,
-                            5 => combat.projectile_count += 1,
-                            6 => combat.projectile_move_time += 1,
-                            7 => combat.projectile_spawn_time += 1,
-                            8 => combat.delete_when_defeated = !combat.delete_when_defeated,
-                            _ => {}
-                        },
-                        GameEvent::TriggerObjectEvent(id) => match *selection {
-                            0 => *id += 1,
-                            _ => {}
-                        },
-                        _ => {}
                     }
                 }
                 KeyCode::Left => {
-                    if *editing_selection {
-                        let Some(event_comp) = self.map.event_components.get(object_id) else {
-                            return true;
-                        };
-                        match &event_comp.events[*current_step].event {
-                            _ => {}
-                        }
-
-                        *selections_selection = (*selections_selection + 3 - 1) % 3;
-                        return true;
+                    if let Some(button) = self.layout.buttons.get_mut(&self.layout.current_button) {
+                        button.button_left();
                     }
-                    let Some(event_comp) = self.map.event_components.get_mut(object_id) else {
-                        return true;
-                    };
-                    let event = &mut event_comp.events[*current_step];
-                    match &mut event.event {
-                        GameEvent::Combat(combat) => match *selection {
-                            0 => combat.player_goes_first = !combat.player_goes_first,
-                            1 => {
-                                combat.turn_result_time = combat.turn_result_time.saturating_sub(1)
-                            }
-                            4 => {
-                                combat.projectile_damage =
-                                    combat.projectile_damage.saturating_sub(1)
-                            }
-                            5 => {
-                                combat.projectile_count = combat.projectile_count.saturating_sub(1)
-                            }
-                            6 => {
-                                combat.projectile_move_time =
-                                    combat.projectile_move_time.saturating_sub(1)
-                            }
-                            7 => {
-                                combat.projectile_spawn_time =
-                                    combat.projectile_spawn_time.saturating_sub(1)
-                            }
-                            8 => combat.delete_when_defeated = !combat.delete_when_defeated,
-                            _ => {}
-                        },
-                        GameEvent::TriggerObjectEvent(id) => match *selection {
-                            0 => *id = id.saturating_sub(1),
-                            _ => {}
-                        },
-                        _ => {}
+                }
+                KeyCode::Right => {
+                    if let Some(button) = self.layout.buttons.get_mut(&self.layout.current_button) {
+                        button.button_right();
                     }
                 }
                 KeyCode::Enter => {
-                    let Some(event_comp) = self.map.event_components.get_mut(object_id) else {
-                        return true;
-                    };
-                    match *selection {
-                        1 => {
-                            if let GameEvent::Dialogue(dialogue) =
-                                &mut event_comp.events[*current_step].event
-                                && !dialogue.selections.is_empty()
-                            {
-                                *editing_selection = !*editing_selection;
-                                *selections_selection = 0;
-                            }
-                        }
-                        2 => {
-                            if let GameEvent::Dialogue(dialogue) =
-                                &mut event_comp.events[*current_step].event
-                                && !dialogue.selections_pointing_event.is_empty()
-                            {
-                                *editing_selection = !*editing_selection;
-                                *selections_selection = 0;
-                            }
-                        }
-                        3 => {
-                            if let GameEvent::Combat(_) =
-                                &mut event_comp.events[*current_step].event
-                            {
-                                *editing_selection = !*editing_selection;
-                                *selections_selection = 0;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                KeyCode::Char('+') => {
-                    let Some(event_comp) = self.map.event_components.get_mut(object_id) else {
-                        return true;
-                    };
-                    match *selection {
-                        1 => {
-                            if let GameEvent::Dialogue(dialogue) =
-                                &mut event_comp.events[*current_step].event
-                            {
-                                dialogue.selections.push(String::new());
-                            }
-                        }
-                        2 => {
-                            if let GameEvent::Dialogue(dialogue) =
-                                &mut event_comp.events[*current_step].event
-                            {
-                                dialogue.selections_pointing_event.push(None);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                KeyCode::Char('-') => {
-                    let Some(event_comp) = self.map.event_components.get_mut(object_id) else {
-                        return true;
-                    };
-                    match *selection {
-                        1 => {
-                            if let GameEvent::Dialogue(dialogue) =
-                                &mut event_comp.events[*current_step].event
-                            {
-                                dialogue.selections.push(String::new());
-                            }
-                        }
-                        2 => {
-                            if let GameEvent::Dialogue(dialogue) =
-                                &mut event_comp.events[*current_step].event
-                            {
-                                dialogue.selections_pointing_event.push(None);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                KeyCode::Char(c) => {
-                    let Some(event_comp) = self.map.event_components.get_mut(object_id) else {
-                        return true;
-                    };
-                    let event = &mut event_comp.events[*current_step];
-                    match &mut event.event {
-                        GameEvent::Combat(combat) => {
-                            if *selection == 2 {
-                                let color = match combat.projectile_icon.fgcolor {
-                                    Some(Color::TrueColor { r, g, b }) => CustomColor::new(r, g, b),
-                                    _ => CustomColor::new(255, 255, 255),
-                                };
-                                combat.projectile_icon = c.to_string().custom_color(color);
-                            }
-                        }
-                        GameEvent::Dialogue(dialogue) => match selection {
-                            0 => dialogue.text.push(c),
-                            1 => {
-                                if *editing_selection {
-                                    dialogue.selections[*selections_selection].push(c)
-                                }
-                            }
-                            _ => {}
-                        },
-                        _ => {}
+                    if let Some(button) = self.layout.buttons.get_mut(&self.layout.current_button) {
+                        button.button_selected();
                     }
                 }
                 KeyCode::Backspace => {
-                    let Some(event_comp) = self.map.event_components.get_mut(object_id) else {
-                        return true;
-                    };
-                    let event = &mut event_comp.events[*current_step];
-                    if let GameEvent::Dialogue(dialogue) = &mut event.event {
-                        if *selection == 0 {
-                            dialogue.text.pop();
-                        } else if *selection == 1 && *editing_selection {
-                            dialogue.selections[*selections_selection].pop();
-                        }
+                    if let Some(button) = self.layout.buttons.get_mut(&self.layout.current_button) {
+                        button.button_backspace();
+                    }
+                }
+                KeyCode::Char(ch) => {
+                    if let Some(button) = self.layout.buttons.get_mut(&self.layout.current_button) {
+                        button.button_char(ch);
                     }
                 }
                 KeyCode::Esc => {
-                    *editing_selection = false;
-                    self.renderer
-                        .set_editor_message(EDITING_EVENT_COMPONENT_MESSAGE);
-                    self.state = EditorState::EditingEventComponent {
-                        object_id: *object_id,
-                        current_step: *current_step,
-                        selection: 1,
-                    }
-                }
-                _ => {}
-            },
-            EditorState::EditingStatsComponent {
-                object_id,
-                selection,
-            } => match key.code {
-                KeyCode::Left => match STATS_COMPONENT_SELECTIONS[*selection] {
-                    "strength" => {
-                        if let Some(stats) = self.map.stats_components.get_mut(object_id) {
-                            stats.strength = stats.strength.saturating_sub(1);
-                        }
-                    }
-                    "agility" => {
-                        if let Some(stats) = self.map.stats_components.get_mut(object_id) {
-                            stats.agility = stats.agility.saturating_sub(1);
-                        }
-                    }
-                    "defense" => {
-                        if let Some(stats) = self.map.stats_components.get_mut(object_id) {
-                            stats.defense = stats.defense.saturating_sub(1);
-                        }
-                    }
-                    "luck" => {
-                        if let Some(stats) = self.map.stats_components.get_mut(object_id) {
-                            stats.luck = stats.luck.saturating_sub(1);
-                        }
-                    }
-                    "max_health" => {
-                        if let Some(stats) = self.map.stats_components.get_mut(object_id) {
-                            stats.max_health = stats.max_health.saturating_sub(1);
-                        }
-                    }
-                    _ => {}
-                },
-                KeyCode::Right => match STATS_COMPONENT_SELECTIONS[*selection] {
-                    "strength" => {
-                        if let Some(stats) = self.map.stats_components.get_mut(object_id) {
-                            stats.strength += 1;
-                        }
-                    }
-                    "agility" => {
-                        if let Some(stats) = self.map.stats_components.get_mut(object_id) {
-                            stats.agility += 1;
-                        }
-                    }
-                    "defense" => {
-                        if let Some(stats) = self.map.stats_components.get_mut(object_id) {
-                            stats.defense += 1;
-                        }
-                    }
-                    "luck" => {
-                        if let Some(stats) = self.map.stats_components.get_mut(object_id) {
-                            stats.luck += 1;
-                        }
-                    }
-                    "max_health" => {
-                        if let Some(stats) = self.map.stats_components.get_mut(object_id) {
-                            stats.max_health += 1;
-                        }
-                    }
-                    _ => {}
-                },
-                KeyCode::Up => {
-                    *selection = (*selection + STATS_COMPONENT_SELECTIONS.len() - 1)
-                        % STATS_COMPONENT_SELECTIONS.len();
-                }
-                KeyCode::Down => {
-                    *selection = (*selection + 1) % STATS_COMPONENT_SELECTIONS.len();
-                }
-                KeyCode::Esc => {
-                    self.renderer.set_editor_message(EDITING_COMPONENT_MESSAGE);
-                    self.state = EditorState::SelectingComponent {
-                        object_id: *object_id,
-                        selection: 3,
-                    }
-                }
-                _ => {}
-            },
-            EditorState::EditingMeasurements {
-                selection,
-                selected,
-                selections_selection,
-            } => match key.code {
-                KeyCode::Up => {
-                    if *selected {
-                        match EDIT_SCREEN_MEASUREMENTS_SELECTIONS[*selection] {
-                            "screen_size" => match *selections_selection {
-                                0 => self.renderer.measurements.screen_size.x += 1,
-                                1 => self.renderer.measurements.screen_size.y += 1,
-                                _ => {}
-                            },
-                            "screen_margins" => match *selections_selection {
-                                0 => self.renderer.measurements.screen_margins.x += 1,
-                                1 => self.renderer.measurements.screen_margins.y += 1,
-                                _ => {}
-                            },
-                            "dialogue_padding" => {
-                                self.renderer.measurements.dialogue_padding =
-                                    self.renderer.measurements.dialogue_padding.wrapping_add(1);
-                            }
-                            "dialogue_text_padding" => {
-                                self.renderer.measurements.dialogue_text_padding = self
-                                    .renderer
-                                    .measurements
-                                    .dialogue_text_padding
-                                    .wrapping_add(1);
-                            }
-                            "dialogue_selection_text_padding" => {
-                                self.renderer.measurements.dialogue_selection_text_padding = self
-                                    .renderer
-                                    .measurements
-                                    .dialogue_selection_text_padding
-                                    .wrapping_add(1);
-                            }
-                            "dialogue_max_character_count" => {
-                                self.renderer.measurements.dialogue_max_character_count = self
-                                    .renderer
-                                    .measurements
-                                    .dialogue_max_character_count
-                                    .wrapping_add(1);
-                            }
-                            "combat_character_padding_y" => {
-                                self.renderer.measurements.combat_character_padding_y = self
-                                    .renderer
-                                    .measurements
-                                    .combat_character_padding_y
-                                    .wrapping_add(1);
-                            }
-                            "combat_character_padding_x" => {
-                                self.renderer.measurements.combat_character_padding_x = self
-                                    .renderer
-                                    .measurements
-                                    .combat_character_padding_x
-                                    .wrapping_add(1);
-                            }
-                            "combat_characters_distance" => {
-                                self.renderer.measurements.combat_characters_distance = self
-                                    .renderer
-                                    .measurements
-                                    .combat_characters_distance
-                                    .wrapping_add(1);
-                            }
-                            "combat_separator_padding_y" => {
-                                self.renderer.measurements.combat_separator_padding_y = self
-                                    .renderer
-                                    .measurements
-                                    .combat_separator_padding_y
-                                    .wrapping_add(1);
-                            }
-                            "combat_selection_separator_padding" => {
-                                self.renderer
-                                    .measurements
-                                    .combat_selection_separator_padding = self
-                                    .renderer
-                                    .measurements
-                                    .combat_selection_separator_padding
-                                    .wrapping_add(1);
-                            }
-                            "combat_health_padding_y" => {
-                                self.renderer.measurements.combat_health_padding_y = self
-                                    .renderer
-                                    .measurements
-                                    .combat_health_padding_y
-                                    .wrapping_add(1);
-                            }
-                            _ => {}
-                        }
-                        return true;
-                    }
-                    *selection = (*selection + EDIT_SCREEN_MEASUREMENTS_SELECTIONS.len() - 1)
-                        % EDIT_SCREEN_MEASUREMENTS_SELECTIONS.len();
-                }
-                KeyCode::Down => {
-                    if *selected {
-                        match EDIT_SCREEN_MEASUREMENTS_SELECTIONS[*selection] {
-                            "screen_size" => match *selections_selection {
-                                0 => {
-                                    self.renderer.measurements.screen_size.x =
-                                        (self.renderer.measurements.screen_size.x - 1).max(0)
-                                }
-                                1 => {
-                                    self.renderer.measurements.screen_size.y =
-                                        (self.renderer.measurements.screen_size.y - 1).max(0)
-                                }
-                                _ => {}
-                            },
-                            "screen_margins" => match *selections_selection {
-                                0 => {
-                                    self.renderer.measurements.screen_margins.x =
-                                        (self.renderer.measurements.screen_margins.x - 1).max(0)
-                                }
-                                1 => {
-                                    self.renderer.measurements.screen_margins.y =
-                                        (self.renderer.measurements.screen_margins.y - 1).max(0)
-                                }
-                                _ => {}
-                            },
-                            "dialogue_padding" => {
-                                self.renderer.measurements.dialogue_padding =
-                                    self.renderer.measurements.dialogue_padding.wrapping_sub(1);
-                            }
-                            "dialogue_text_padding" => {
-                                self.renderer.measurements.dialogue_text_padding = self
-                                    .renderer
-                                    .measurements
-                                    .dialogue_text_padding
-                                    .wrapping_sub(1);
-                            }
-                            "dialogue_selection_text_padding" => {
-                                self.renderer.measurements.dialogue_selection_text_padding = self
-                                    .renderer
-                                    .measurements
-                                    .dialogue_selection_text_padding
-                                    .wrapping_sub(1);
-                            }
-                            "dialogue_max_character_count" => {
-                                self.renderer.measurements.dialogue_max_character_count = self
-                                    .renderer
-                                    .measurements
-                                    .dialogue_max_character_count
-                                    .wrapping_sub(1);
-                            }
-                            "combat_character_padding_y" => {
-                                self.renderer.measurements.combat_character_padding_y = self
-                                    .renderer
-                                    .measurements
-                                    .combat_character_padding_y
-                                    .wrapping_sub(1);
-                            }
-                            "combat_character_padding_x" => {
-                                self.renderer.measurements.combat_character_padding_x = self
-                                    .renderer
-                                    .measurements
-                                    .combat_character_padding_x
-                                    .wrapping_sub(1);
-                            }
-                            "combat_characters_distance" => {
-                                self.renderer.measurements.combat_characters_distance = self
-                                    .renderer
-                                    .measurements
-                                    .combat_characters_distance
-                                    .wrapping_sub(1);
-                            }
-                            "combat_separator_padding_y" => {
-                                self.renderer.measurements.combat_separator_padding_y = self
-                                    .renderer
-                                    .measurements
-                                    .combat_separator_padding_y
-                                    .wrapping_sub(1);
-                            }
-                            "combat_selection_separator_padding" => {
-                                self.renderer
-                                    .measurements
-                                    .combat_selection_separator_padding = self
-                                    .renderer
-                                    .measurements
-                                    .combat_selection_separator_padding
-                                    .wrapping_sub(1);
-                            }
-                            "combat_health_padding_y" => {
-                                self.renderer.measurements.combat_health_padding_y = self
-                                    .renderer
-                                    .measurements
-                                    .combat_health_padding_y
-                                    .wrapping_sub(1);
-                            }
-                            _ => {}
-                        }
-                        return true;
-                    }
-                    *selection = (*selection + 1) % EDIT_SCREEN_MEASUREMENTS_SELECTIONS.len();
-                }
-                KeyCode::Left => {
-                    if !*selected {
-                        *selection = (*selection + EDIT_SCREEN_MEASUREMENTS_SELECTIONS.len() - 1)
-                            % EDIT_SCREEN_MEASUREMENTS_SELECTIONS.len();
-                        *selections_selection = 0;
-                        return true;
-                    }
-                    let max = match EDIT_SCREEN_MEASUREMENTS_SELECTIONS[*selection] {
-                        "screen_size" | "screen_margins" => 2,
-                        _ => 1,
-                    };
-                    *selections_selection = (*selections_selection + max - 1) % max;
-                }
-                KeyCode::Right => {
-                    if !*selected {
-                        *selection = (*selection + 1) % EDIT_SCREEN_MEASUREMENTS_SELECTIONS.len();
-                        *selections_selection = 0;
-                        return true;
-                    }
-                    let max = match EDIT_SCREEN_MEASUREMENTS_SELECTIONS[*selection] {
-                        "screen_size" | "screen_margins" => 2,
-                        _ => 1,
-                    };
-                    *selections_selection = (*selections_selection + 1) % max;
-                }
-                KeyCode::Enter => *selected = !*selected,
-                KeyCode::Esc => {
-                    self.renderer.set_editor_message(BROSWING_MESSAGE);
-                    self.state = EditorState::Browsing {
-                        cursor: Vector2::new(
-                            self.renderer.measurements.screen_size.x / 2,
-                            self.renderer.measurements.screen_size.y / 2,
-                        ),
-                    };
+                    self.change_to_last_state();
                 }
                 _ => {}
             },
         }
         return true;
     }
-}
 
-pub fn get_event_field_count(map: &Map, object_id: GameObjectID, current_step: usize) -> usize {
-    let Some(event_comp) = map.event_components.get(&object_id) else {
-        return 1;
-    };
-    match &event_comp.events[current_step].event {
-        GameEvent::Dialogue(_) => 3,
-        GameEvent::Combat(_) => 9,
-        GameEvent::TriggerObjectEvent(_) => 1,
-        GameEvent::None => 0,
+    pub fn change_state(&mut self, new_state: EditorState) {
+        self.layout.buttons.clear();
+        self.layout.current_button = 0;
+        self.state = new_state;
+        match &self.state {
+            EditorState::Browsing => {
+                self.renderer.set_editor_message(BROSWING_MESSAGE);
+            }
+            EditorState::EditingMeasurements => {
+                self.renderer.set_editor_message(EDITING_MESSAGE);
+                self.layout.add_button(
+                    "Screen size".to_string(),
+                    ButtonValue::Vector2(self.renderer.measurements.screen_size),
+                );
+                self.layout.add_button(
+                    "Screen margins".to_string(),
+                    ButtonValue::Vector2(self.renderer.measurements.screen_margins),
+                );
+                self.layout.add_button(
+                    "Dialogue padding".to_string(),
+                    ButtonValue::Usize(self.renderer.measurements.dialogue_padding),
+                );
+                self.layout.add_button(
+                    "Dialogue text padding".to_string(),
+                    ButtonValue::Usize(self.renderer.measurements.dialogue_text_padding),
+                );
+                self.layout.add_button(
+                    "Dialogue selection text padding".to_string(),
+                    ButtonValue::Usize(self.renderer.measurements.dialogue_selection_text_padding),
+                );
+                self.layout.add_button(
+                    "Combat character padding x".to_string(),
+                    ButtonValue::Usize(self.renderer.measurements.combat_character_padding_x),
+                );
+                self.layout.add_button(
+                    "Combat character padding y".to_string(),
+                    ButtonValue::Usize(self.renderer.measurements.combat_character_padding_y),
+                );
+                self.layout.add_button(
+                    "Combat character distance".to_string(),
+                    ButtonValue::Usize(self.renderer.measurements.combat_characters_distance),
+                );
+                self.layout.add_button(
+                    "Combat seperator padding y".to_string(),
+                    ButtonValue::Usize(self.renderer.measurements.combat_separator_padding_y),
+                );
+                self.layout.add_button(
+                    "Combat selection seperator padding".to_string(),
+                    ButtonValue::Usize(
+                        self.renderer
+                            .measurements
+                            .combat_selection_separator_padding,
+                    ),
+                );
+                self.layout.add_button(
+                    "Combat health padding y".to_string(),
+                    ButtonValue::Usize(self.renderer.measurements.combat_health_padding_y),
+                );
+            }
+            EditorState::EditingObject(object_id) => {
+                self.renderer.set_editor_message(EDITING_MESSAGE);
+                let Some(object) = self.map.objects.get(object_id) else {
+                    return;
+                };
+                self.layout.add_button(
+                    "Position".to_string(),
+                    ButtonValue::Vector2(object.position),
+                );
+                self.layout.add_button(
+                    "Icon".to_string(),
+                    ButtonValue::Char(object.icon.to_string().chars().next().unwrap()), // this shit is a mouthfull
+                );
+                self.layout
+                    .add_button("Color".to_string(), ButtonValue::Color(object.icon.fgcolor));
+                self.layout.add_button(
+                    "Components".to_string(),
+                    ButtonValue::StateChange(EditorState::SelectingComponent(*object_id)),
+                );
+                self.layout.add_button(
+                    "Camera Operator".to_string(),
+                    ButtonValue::Bool(self.map.camera_operator == *object_id),
+                );
+                self.layout
+                    .add_button("Delete Object".to_string(), ButtonValue::Bool(false));
+            }
+            EditorState::SelectingComponent(object_id) => {
+                self.renderer.set_editor_message(EDITING_MESSAGE);
+                self.layout.add_button(
+                    "Moveable Component".to_string(),
+                    ButtonValue::Bool(self.map.moveable_components.contains_key(object_id)),
+                );
+                self.layout.add_button(
+                    "Input Component".to_string(),
+                    ButtonValue::Bool(self.map.input_components.contains_key(object_id)),
+                );
+                let event_comp_str = if self.map.event_components.contains_key(object_id) {
+                    "Event Component  X".to_string()
+                } else {
+                    "Event Component".to_string()
+                };
+                self.layout.add_button(
+                    event_comp_str,
+                    ButtonValue::StateChange(EditorState::EditingEventComponent(*object_id)),
+                );
+                let stats_comp_str = if self.map.stats_components.contains_key(object_id) {
+                    "Stats Component  X".to_string()
+                } else {
+                    "Stats Component".to_string()
+                };
+                self.layout.add_button(
+                    stats_comp_str,
+                    ButtonValue::StateChange(EditorState::EditingStatsComponent(*object_id)),
+                );
+            }
+            EditorState::EditingStatsComponent(object_id) => {
+                self.renderer.set_editor_message(EDITING_MESSAGE);
+
+                let Some(stats_comp) = self.map.stats_components.get(object_id) else {
+                    return;
+                };
+
+                self.layout.add_button(
+                    "Strength".to_string(),
+                    ButtonValue::Usize(stats_comp.strength),
+                );
+                self.layout.add_button(
+                    "Agility".to_string(),
+                    ButtonValue::Usize(stats_comp.agility),
+                );
+                self.layout.add_button(
+                    "Defense".to_string(),
+                    ButtonValue::Usize(stats_comp.defense),
+                );
+                self.layout
+                    .add_button("Luck".to_string(), ButtonValue::Usize(stats_comp.luck));
+                self.layout.add_button(
+                    "Max Health".to_string(),
+                    ButtonValue::Usize(stats_comp.max_health),
+                );
+                self.layout.add_button(
+                    "Delete Stats Component".to_string(),
+                    ButtonValue::Bool(false),
+                );
+            }
+            EditorState::EditingEventComponent(object_id) => {
+                self.renderer.set_editor_message(EDITING_MESSAGE);
+                let Some(event_comp) = self.map.event_components.get(object_id) else {
+                    return;
+                };
+
+                self.layout.add_button(
+                    "".to_string(),
+                    ButtonValue::IndexSelection(0, event_comp.events.len()),
+                );
+                self.layout.add_button(
+                    "Event :".to_string(),
+                    ButtonValue::Enum(event_comp.events[0].event.clone_box()),
+                );
+                self.layout.add_button(
+                    "Event requirement :".to_string(),
+                    ButtonValue::Enum(event_comp.events[0].requirement.clone_box()),
+                );
+                self.layout.add_button(
+                    "Repeat if requirement not met".to_string(),
+                    ButtonValue::Bool(event_comp.events[0].repeat),
+                );
+                self.layout.add_button(
+                    "Next Event ID".to_string(),
+                    ButtonValue::OptionUsize(event_comp.events[0].next_event),
+                );
+                self.layout
+                    .add_button("Add event step".to_string(), ButtonValue::Bool(false));
+                self.layout
+                    .add_button("Remove event step".to_string(), ButtonValue::Bool(false));
+            }
+            EditorState::EditingDialogueEvent(object_id, event_id) => {
+                let Some(event_comp) = self.map.event_components.get(object_id) else {
+                    return;
+                };
+                let GameEvent::Dialogue(dialogue) = &event_comp.events[*event_id].event else {
+                    return;
+                };
+                self.layout.add_button(
+                    "Text:".to_string(),
+                    ButtonValue::String(dialogue.text.clone()),
+                );
+
+                let mut buttons: Vec<Button> = Vec::new();
+                for i in &dialogue.selections {
+                    buttons.push(Button::new("".to_string(), ButtonValue::String(i.clone())));
+                }
+                self.layout.add_button(
+                    "Selections".to_string(),
+                    ButtonValue::SubButtons(
+                        buttons,
+                        Box::new(Button::new(
+                            "".to_string(),
+                            ButtonValue::String("".to_string()),
+                        )),
+                    ),
+                );
+                let mut buttons: Vec<Button> = Vec::new();
+                for i in &dialogue.selections_pointing_event {
+                    buttons.push(Button::new(
+                        "".to_string(),
+                        ButtonValue::OptionUsize(i.clone()),
+                    ));
+                }
+                self.layout.add_button(
+                    "Selections Pointing Event".to_string(),
+                    ButtonValue::SubButtons(
+                        buttons,
+                        Box::new(Button::new("".to_string(), ButtonValue::OptionUsize(None))),
+                    ),
+                );
+            }
+            EditorState::EditingTriggerObjectEvent(object_id, event_id) => {
+                let Some(event_comp) = self.map.event_components.get(object_id) else {
+                    return;
+                };
+                let GameEvent::TriggerObjectEvent(trigger_object) =
+                    &event_comp.events[*event_id].event
+                else {
+                    return;
+                };
+                self.layout.add_button(
+                    "Target ID:".to_string(),
+                    ButtonValue::Usize(*trigger_object),
+                );
+            }
+            EditorState::EditingCombatEvent(object_id, event_id) => {
+                let Some(event_comp) = self.map.event_components.get(object_id) else {
+                    return;
+                };
+                let GameEvent::Combat(combat) = &event_comp.events[*event_id].event else {
+                    return;
+                };
+                self.layout.add_button(
+                    "Player goes first:".to_string(),
+                    ButtonValue::Bool(combat.player_goes_first),
+                );
+                self.layout.add_button(
+                    "Turn result time".to_string(),
+                    ButtonValue::Usize(combat.turn_result_time),
+                );
+                self.layout.add_button(
+                    "Projectile icon".to_string(),
+                    ButtonValue::Char(combat.projectile_icon.to_string().chars().next().unwrap()),
+                );
+                self.layout.add_button(
+                    "Projectile color".to_string(),
+                    ButtonValue::Color(combat.projectile_icon.fgcolor),
+                );
+                self.layout.add_button(
+                    "Projectile damage:".to_string(),
+                    ButtonValue::Usize(combat.projectile_damage),
+                );
+                self.layout.add_button(
+                    "Projectile count:".to_string(),
+                    ButtonValue::Usize(combat.projectile_count),
+                );
+                self.layout.add_button(
+                    "Projectile move time:".to_string(),
+                    ButtonValue::Usize(combat.projectile_move_time),
+                );
+                self.layout.add_button(
+                    "Projectile spawn time:".to_string(),
+                    ButtonValue::Usize(combat.projectile_spawn_time),
+                );
+                self.layout.add_button(
+                    "Delete When Defeated".to_string(),
+                    ButtonValue::Bool(combat.delete_when_defeated),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn change_to_last_state(&mut self) {
+        match &self.state {
+            EditorState::EditingObject(_) | EditorState::EditingMeasurements => {
+                self.change_state(EditorState::Browsing)
+            }
+            EditorState::SelectingComponent(object_id) => {
+                self.change_state(EditorState::EditingObject(*object_id));
+            }
+            EditorState::EditingStatsComponent(object_id)
+            | EditorState::EditingEventComponent(object_id) => {
+                self.change_state(EditorState::SelectingComponent(*object_id));
+            }
+            EditorState::EditingDialogueEvent(object_id, _)
+            | EditorState::EditingTriggerObjectEvent(object_id, _)
+            | EditorState::EditingCombatEvent(object_id, _) => {
+                self.change_state(EditorState::EditingEventComponent(*object_id));
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1414,16 +715,544 @@ pub fn run() -> io::Result<()> {
 
         editor
             .renderer
-            .render_editor(&editor.state, &editor.camera, &editor.map);
+            .render_editor(&editor.state, &editor.camera, &editor.map, &editor.layout);
 
         stdout.flush()?;
 
         if event::poll(Duration::from_millis(0))?
             && let Ok(key_event) = event::read()
+            && let Some(event) = key_event.as_key_press_event()
         {
-            if let Some(event) = key_event.as_key_press_event()
-                && editor.process_input(event) == false
-            {
+            if editor.process_input(event) {
+                match &editor.state {
+                    EditorState::EditingObject(object_id) => {
+                        if let Some(button) = editor.layout.buttons.get_mut(&0)
+                            && button.value_changed
+                        {
+                            if let ButtonValue::Vector2(vec) = button.value {
+                                editor.map.change_object_position(*object_id, vec);
+                                button.value_changed = false;
+                            }
+                        }
+                        let Some(object) = editor.map.objects.get_mut(object_id) else {
+                            break;
+                        };
+                        if let Some(button) = editor.layout.buttons.get_mut(&1)
+                            && button.value_changed
+                        {
+                            if let ButtonValue::Char(ch) = button.value {
+                                if let Some(Color::TrueColor { r, g, b }) = &object.icon.fgcolor {
+                                    object.icon =
+                                        ch.to_string().custom_color(CustomColor::new(*r, *g, *b));
+                                    button.value_changed = false;
+                                }
+                            }
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&2)
+                            && button.value_changed
+                        {
+                            if let ButtonValue::Color(color) = button.value {
+                                object.icon.fgcolor = color;
+                                button.value_changed = false;
+                            }
+                        }
+                        if let Some(button) = editor.layout.buttons.get(&3)
+                            && button.selected
+                        {
+                            if let ButtonValue::StateChange(state) = button.value.clone() {
+                                editor.change_state(state.clone());
+                                continue;
+                            }
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&4)
+                            && button.value_changed
+                        {
+                            if let ButtonValue::Bool(value) = &mut button.value {
+                                if editor.map.objects.len() > 1 {
+                                    if editor.map.camera_operator == *object_id {
+                                        editor.map.camera_operator = wrap_remove(
+                                            *object_id,
+                                            1,
+                                            editor.map.objects.len() - 1,
+                                            0,
+                                        );
+                                        *value = false;
+                                    } else {
+                                        editor.map.camera_operator = *object_id;
+                                        *value = true;
+                                    }
+                                } else {
+                                    editor.map.camera_operator = *object_id;
+                                    *value = true;
+                                }
+                                button.value_changed = false;
+                            }
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&5)
+                            && button.value_changed
+                        {
+                            editor.map.objects.remove(object_id);
+                            editor.change_to_last_state();
+                            continue;
+                        }
+                    }
+                    EditorState::EditingMeasurements => {
+                        let m = &mut editor.renderer.measurements;
+                        if let Some(button) = editor.layout.buttons.get_mut(&0)
+                            && button.value_changed
+                            && let ButtonValue::Vector2(value) = &mut button.value
+                        {
+                            m.screen_size = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&1)
+                            && button.value_changed
+                            && let ButtonValue::Vector2(value) = &mut button.value
+                        {
+                            m.screen_margins = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&2)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            m.dialogue_padding = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&3)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            m.dialogue_text_padding = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&4)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            m.dialogue_selection_text_padding = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&5)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            m.combat_character_padding_x = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&6)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            m.combat_character_padding_y = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&7)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            m.combat_characters_distance = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&8)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            m.combat_separator_padding_y = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&9)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            m.combat_selection_separator_padding = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&10)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            m.combat_health_padding_y = *value;
+                            button.value_changed = false;
+                        }
+                    }
+                    EditorState::SelectingComponent(object_id) => {
+                        if let Some(button) = editor.layout.buttons.get_mut(&0)
+                            && button.value_changed
+                            && let ButtonValue::Bool(value) = &mut button.value
+                        {
+                            button.value_changed = false;
+                            button.selected = false;
+                            if editor.map.moveable_components.contains_key(object_id) {
+                                editor.map.moveable_components.remove(object_id);
+                                *value = false;
+                            } else {
+                                editor.map.insert_moveable_component(*object_id);
+                                *value = true;
+                            }
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&1)
+                            && button.value_changed
+                            && let ButtonValue::Bool(value) = &mut button.value
+                        {
+                            button.value_changed = false;
+                            button.selected = false;
+                            if editor.map.input_components.contains_key(object_id) {
+                                editor.map.input_components.remove(object_id);
+                                *value = false;
+                            } else {
+                                editor.map.insert_input_component(*object_id);
+                                *value = true;
+                            }
+                        }
+                        if let Some(button) = editor.layout.buttons.get(&2)
+                            && button.selected
+                            && let ButtonValue::StateChange(state) = &button.value
+                        {
+                            editor.map.insert_event_component(
+                                *object_id,
+                                vec![EventStep::new(
+                                    GameEvent::None,
+                                    EventCondition::None,
+                                    false,
+                                    None,
+                                )],
+                            );
+                            editor.change_state(state.clone());
+                            continue;
+                        }
+                        if let Some(button) = editor.layout.buttons.get(&3)
+                            && button.selected
+                            && let ButtonValue::StateChange(state) = &button.value
+                        {
+                            editor.map.insert_stats_component(
+                                *object_id,
+                                StatsComponent::new(0, 0, 0, 0, 0),
+                            );
+                            editor.change_state(state.clone());
+                            continue;
+                        }
+                    }
+                    EditorState::EditingStatsComponent(object_id) => {
+                        let Some(stats_comp) = editor.map.stats_components.get_mut(object_id)
+                        else {
+                            continue;
+                        };
+                        if let Some(button) = editor.layout.buttons.get_mut(&0)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            stats_comp.strength = *value;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&1)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            stats_comp.agility = *value;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&2)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            stats_comp.defense = *value;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&3)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            stats_comp.luck = *value;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&4)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            stats_comp.max_health = *value;
+                        }
+                        if let Some(button) = editor.layout.buttons.get(&5)
+                            && button.value_changed
+                        {
+                            editor.map.stats_components.remove(object_id);
+                            editor.change_to_last_state();
+                            continue;
+                        }
+                    }
+                    EditorState::EditingEventComponent(object_id) => {
+                        let Some(event_comp) = editor.map.event_components.get_mut(object_id)
+                        else {
+                            continue;
+                        };
+                        let mut current_index = 0;
+                        let reset_buttons =
+                            |i: usize, layout: &mut Layout, comp: &EventComponent| {
+                                if let Some(button) = layout.buttons.get_mut(&0)
+                                    && let ButtonValue::IndexSelection(index, length) =
+                                        &mut button.value
+                                {
+                                    *index = i;
+                                    *length = comp.events.len();
+                                }
+                                if let Some(button) = layout.buttons.get_mut(&1)
+                                    && let ButtonValue::Enum(value) = &mut button.value
+                                {
+                                    *value = comp.events[i].event.clone_box();
+                                }
+                                if let Some(button) = layout.buttons.get_mut(&2)
+                                    && let ButtonValue::Enum(value) = &mut button.value
+                                {
+                                    *value = comp.events[i].requirement.clone_box();
+                                }
+                                if let Some(button) = layout.buttons.get_mut(&3)
+                                    && let ButtonValue::Bool(value) = &mut button.value
+                                {
+                                    *value = comp.events[i].repeat;
+                                }
+                                if let Some(button) = layout.buttons.get_mut(&4)
+                                    && let ButtonValue::OptionUsize(value) = &mut button.value
+                                {
+                                    *value = comp.events[i].next_event;
+                                }
+                            };
+
+                        if let Some(button) = editor.layout.buttons.get_mut(&0)
+                            && let ButtonValue::IndexSelection(index, _) = &mut button.value
+                        {
+                            current_index = *index;
+                            if button.value_changed {
+                                button.value_changed = false;
+                                reset_buttons(current_index, &mut editor.layout, event_comp);
+                            }
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&1)
+                            && let ButtonValue::Enum(value) = &mut button.value
+                            && let Some(game_event) = value.as_any().downcast_ref::<GameEvent>()
+                        {
+                            if button.selected {
+                                match game_event {
+                                    GameEvent::Dialogue(_) => {
+                                        editor.change_state(EditorState::EditingDialogueEvent(
+                                            *object_id,
+                                            current_index,
+                                        ));
+                                        continue;
+                                    }
+                                    GameEvent::Combat(_) => {
+                                        editor.change_state(EditorState::EditingCombatEvent(
+                                            *object_id,
+                                            current_index,
+                                        ));
+                                        continue;
+                                    }
+                                    GameEvent::TriggerObjectEvent(_) => {
+                                        editor.change_state(
+                                            EditorState::EditingTriggerObjectEvent(
+                                                *object_id,
+                                                current_index,
+                                            ),
+                                        );
+                                        continue;
+                                    }
+                                    GameEvent::None => {}
+                                }
+                            }
+                            if button.value_changed {
+                                event_comp.events[current_index].event = game_event.clone();
+                                button.value_changed = false;
+                            }
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&2)
+                            && button.value_changed
+                            && let ButtonValue::Enum(value) = &mut button.value
+                            && let Some(condition) = value.as_any().downcast_ref::<EventCondition>()
+                        {
+                            event_comp.events[current_index].requirement = condition.clone();
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&3)
+                            && button.value_changed
+                            && let ButtonValue::Bool(value) = &mut button.value
+                        {
+                            event_comp.events[current_index].repeat = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&4)
+                            && button.value_changed
+                            && let ButtonValue::OptionUsize(value) = &mut button.value
+                        {
+                            event_comp.events[current_index].next_event = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&5)
+                            && button.value_changed
+                            && let ButtonValue::Bool(value) = &mut button.value
+                        {
+                            event_comp.events.push(EventStep::new(
+                                GameEvent::None,
+                                EventCondition::None,
+                                false,
+                                None,
+                            ));
+                            button.value_changed = false;
+                            *value = false;
+                            reset_buttons(current_index + 1, &mut editor.layout, event_comp);
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&6)
+                            && button.value_changed
+                            && let ButtonValue::Bool(value) = &mut button.value
+                        {
+                            if event_comp.events.len() > 1 {
+                                event_comp.events.remove(current_index);
+                                button.value_changed = false;
+                                *value = false;
+                                current_index =
+                                    wrap_remove(current_index, 1, event_comp.events.len() - 1, 0);
+                                reset_buttons(current_index, &mut editor.layout, event_comp);
+                            } else {
+                                editor.map.event_components.remove(object_id);
+                                editor.change_to_last_state();
+                                continue;
+                            }
+                        }
+                    }
+                    EditorState::EditingDialogueEvent(object_id, event_id) => {
+                        let Some(event_comp) = editor.map.event_components.get_mut(object_id)
+                        else {
+                            continue;
+                        };
+                        let GameEvent::Dialogue(dialogue) = &mut event_comp.events[*event_id].event
+                        else {
+                            continue;
+                        };
+                        if let Some(button) = editor.layout.buttons.get_mut(&0)
+                            && button.value_changed
+                            && let ButtonValue::String(str) = &mut button.value
+                        {
+                            dialogue.text = str.clone();
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&1)
+                            && button.value_changed
+                            && let ButtonValue::SubButtons(buttons, _) = &mut button.value
+                        {
+                            dialogue.selections.clear();
+                            for b in buttons {
+                                if let ButtonValue::String(str) = &mut b.value {
+                                    dialogue.selections.push(str.clone());
+                                }
+                            }
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&2)
+                            && button.value_changed
+                            && let ButtonValue::SubButtons(buttons, _) = &mut button.value
+                        {
+                            dialogue.selections_pointing_event.clear();
+                            for b in buttons {
+                                if let ButtonValue::OptionUsize(value) = &mut b.value {
+                                    dialogue.selections_pointing_event.push(*value);
+                                }
+                            }
+                            button.value_changed = false;
+                        }
+                    }
+                    EditorState::EditingTriggerObjectEvent(object_id, event_id) => {
+                        let Some(event_comp) = editor.map.event_components.get_mut(object_id)
+                        else {
+                            continue;
+                        };
+                        let GameEvent::TriggerObjectEvent(trigger_object_id) =
+                            &mut event_comp.events[*event_id].event
+                        else {
+                            continue;
+                        };
+                        if let Some(button) = editor.layout.buttons.get_mut(&0)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            *trigger_object_id = *value;
+                            button.value_changed = false;
+                        }
+                    }
+                    EditorState::EditingCombatEvent(object_id, event_id) => {
+                        let Some(event_comp) = editor.map.event_components.get_mut(object_id)
+                        else {
+                            continue;
+                        };
+                        let GameEvent::Combat(combat) = &mut event_comp.events[*event_id].event
+                        else {
+                            continue;
+                        };
+                        if let Some(button) = editor.layout.buttons.get_mut(&0)
+                            && button.value_changed
+                            && let ButtonValue::Bool(value) = &mut button.value
+                        {
+                            combat.player_goes_first = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&1)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            combat.turn_result_time = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&2)
+                            && button.value_changed
+                            && let ButtonValue::Char(ch) = &mut button.value
+                        {
+                            if let Some(Color::TrueColor { r, g, b }) =
+                                &combat.projectile_icon.fgcolor
+                            {
+                                combat.projectile_icon =
+                                    ch.to_string().custom_color(CustomColor::new(*r, *g, *b));
+                            }
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&3)
+                            && button.value_changed
+                            && let ButtonValue::Color(color) = &mut button.value
+                        {
+                            combat.projectile_icon.fgcolor = *color;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&4)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            combat.projectile_damage = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&5)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            combat.projectile_count = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&6)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            combat.projectile_move_time = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&7)
+                            && button.value_changed
+                            && let ButtonValue::Usize(value) = &mut button.value
+                        {
+                            combat.projectile_spawn_time = *value;
+                            button.value_changed = false;
+                        }
+                        if let Some(button) = editor.layout.buttons.get_mut(&8)
+                            && button.value_changed
+                            && let ButtonValue::Bool(value) = &mut button.value
+                        {
+                            combat.delete_when_defeated = *value;
+                            button.value_changed = false;
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
                 break;
             }
         }
@@ -1434,4 +1263,454 @@ pub fn run() -> io::Result<()> {
     execute!(stdout, terminal::LeaveAlternateScreen, cursor::Show)?;
     disable_raw_mode()?;
     Ok(())
+}
+
+pub trait UiEnum {
+    fn name(&self) -> &str;
+    fn index(&self) -> usize;
+    fn next(&self) -> Box<dyn UiEnum>;
+    fn prev(&self) -> Box<dyn UiEnum>;
+    fn clone_box(&self) -> Box<dyn UiEnum>;
+    fn as_any(&self) -> &dyn Any;
+}
+impl UiEnum for GameEvent {
+    fn name(&self) -> &str {
+        match self {
+            GameEvent::None => "None",
+            GameEvent::Dialogue(_) => "Dialogue",
+            GameEvent::Combat(_) => "Combat",
+            GameEvent::TriggerObjectEvent(_) => "Trigger Object Event",
+        }
+    }
+    fn index(&self) -> usize {
+        match self {
+            GameEvent::None => 0,
+            GameEvent::Dialogue(_) => 1,
+            GameEvent::Combat(_) => 2,
+            GameEvent::TriggerObjectEvent(_) => 3,
+        }
+    }
+    fn next(&self) -> Box<dyn UiEnum> {
+        Box::new(match self {
+            GameEvent::None => GameEvent::Dialogue(Dialogue::new(String::new(), vec![], vec![], 0)),
+            GameEvent::Dialogue(_) => GameEvent::Combat(Combat::new(
+                CombatPhase::PlayerTurn,
+                false,
+                false,
+                1,
+                "#".custom_color(CustomColor::new(255, 255, 255)),
+                1,
+                1,
+                1,
+                1,
+                false,
+            )),
+            GameEvent::Combat(_) => GameEvent::TriggerObjectEvent(0),
+            GameEvent::TriggerObjectEvent(_) => GameEvent::None,
+        })
+    }
+    fn prev(&self) -> Box<dyn UiEnum> {
+        Box::new(match self {
+            GameEvent::None => GameEvent::TriggerObjectEvent(0),
+            GameEvent::Dialogue(_) => GameEvent::None,
+            GameEvent::Combat(_) => {
+                GameEvent::Dialogue(Dialogue::new(String::new(), vec![], vec![], 0))
+            }
+            GameEvent::TriggerObjectEvent(_) => GameEvent::Combat(Combat::new(
+                CombatPhase::PlayerTurn,
+                false,
+                false,
+                1,
+                "#".custom_color(CustomColor::new(255, 255, 255)),
+                1,
+                1,
+                1,
+                1,
+                false,
+            )),
+        })
+    }
+    fn clone_box(&self) -> Box<dyn UiEnum> {
+        Box::new(self.clone())
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+impl UiEnum for EventCondition {
+    fn name(&self) -> &str {
+        match self {
+            EventCondition::None => "None",
+        }
+    }
+    fn index(&self) -> usize {
+        match self {
+            EventCondition::None => 0,
+        }
+    }
+    fn next(&self) -> Box<dyn UiEnum> {
+        Box::new(match self {
+            EventCondition::None => EventCondition::None,
+        })
+    }
+    fn prev(&self) -> Box<dyn UiEnum> {
+        Box::new(match self {
+            EventCondition::None => EventCondition::None,
+        })
+    }
+    fn clone_box(&self) -> Box<dyn UiEnum> {
+        Box::new(self.clone())
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+pub enum ButtonValue {
+    Vector2(Vector2),
+    Color(Option<Color>),
+    Usize(usize),
+    OptionUsize(Option<usize>),
+    I32(i32),
+    Bool(bool),
+    Char(char),
+    String(String),
+    StateChange(EditorState),
+    IndexSelection(usize /*Index*/, usize /*Length*/),
+    Enum(Box<dyn UiEnum>),
+    SubButtons(Vec<Button>, Box<Button> /*Clone of First Button*/),
+}
+impl Clone for ButtonValue {
+    fn clone(&self) -> Self {
+        match self {
+            ButtonValue::Vector2(v) => ButtonValue::Vector2(v.clone()),
+            ButtonValue::Color(c) => ButtonValue::Color(c.clone()),
+            ButtonValue::Usize(u) => ButtonValue::Usize(*u),
+            ButtonValue::OptionUsize(u) => ButtonValue::OptionUsize(*u),
+            ButtonValue::I32(i) => ButtonValue::I32(*i),
+            ButtonValue::Bool(b) => ButtonValue::Bool(*b),
+            ButtonValue::Char(c) => ButtonValue::Char(*c),
+            ButtonValue::String(s) => ButtonValue::String(s.clone()),
+            ButtonValue::StateChange(s) => ButtonValue::StateChange(s.clone()),
+            ButtonValue::Enum(e) => ButtonValue::Enum(e.clone_box()),
+            ButtonValue::IndexSelection(i, l) => ButtonValue::IndexSelection(*i, *l),
+            ButtonValue::SubButtons(b, fb) => ButtonValue::SubButtons(b.clone(), fb.clone()),
+        }
+    }
+}
+#[derive(Clone)]
+pub struct Button {
+    pub value: ButtonValue,
+    pub name: String,
+    pub selected: bool,
+    pub value_index: usize,
+    pub value_changed: bool,
+}
+impl Button {
+    pub fn new(name: String, value: ButtonValue) -> Self {
+        Self {
+            value,
+            name,
+            selected: false,
+            value_index: 0,
+            value_changed: false,
+        }
+    }
+    pub fn button_backspace(&mut self) {
+        match &mut self.value {
+            ButtonValue::SubButtons(buttons, _) => {
+                self.selected = false;
+                if let Some(button) = buttons.get_mut(self.value_index) {
+                    button.selected = self.selected;
+                }
+            }
+            ButtonValue::Vector2(_) => {
+                self.selected = false;
+            }
+            _ => {}
+        }
+    }
+    pub fn button_selected(&mut self) {
+        match &mut self.value {
+            ButtonValue::Bool(value) => {
+                *value = !*value;
+                self.value_changed = true;
+            }
+            ButtonValue::Vector2(_)
+            | ButtonValue::StateChange(_)
+            | ButtonValue::Color(_)
+            | ButtonValue::Char(_)
+            | ButtonValue::Enum(_)
+            | ButtonValue::String(_) => {
+                self.selected = !self.selected;
+            }
+            ButtonValue::SubButtons(buttons, first_button) => {
+                if self.value_index == buttons.len() - 1 && buttons.len() > 2 && self.selected {
+                    if buttons.len() > 2 {
+                        buttons.remove(buttons.len() - 3);
+                        self.value_index = buttons.len() - 1;
+                        self.value_changed = true;
+                        return;
+                    }
+                    self.selected = false;
+                    return;
+                } else if self.value_index == buttons.len() - 2 && self.selected {
+                    buttons.insert(buttons.len() - 2, *first_button.clone());
+                    self.value_index = buttons.len() - 2;
+                    self.value_changed = true;
+                    return;
+                }
+                self.selected = !self.selected;
+                if let Some(button) = buttons.get_mut(self.value_index) {
+                    button.selected = self.selected;
+                }
+            }
+            _ => {}
+        }
+    }
+    pub fn button_right(&mut self) {
+        match &mut self.value {
+            ButtonValue::Vector2(_) => {
+                if self.selected {
+                    self.value_index = wrap_add(self.value_index, 1, 1, 0);
+                    self.value_changed = true;
+                }
+            }
+            ButtonValue::Color(_) => {
+                if self.selected {
+                    self.value_index = wrap_add(self.value_index, 1, 2, 0);
+                    self.value_changed = true;
+                }
+            }
+            ButtonValue::Usize(value) => {
+                *value = wrap_add(*value, 1, usize::MAX, 0);
+                self.value_changed = true;
+            }
+            ButtonValue::OptionUsize(value) => {
+                if let Some(val) = value {
+                    *val += 1;
+                } else {
+                    *value = Some(0);
+                }
+                self.value_changed = true;
+            }
+            ButtonValue::I32(value) => {
+                *value = wrap_add(*value, 1, i32::MAX, i32::MIN);
+                self.value_changed = true;
+            }
+            ButtonValue::Bool(_) => {}
+            ButtonValue::Char(_) => {}
+            ButtonValue::String(_) => {}
+            ButtonValue::StateChange(_) => {}
+            ButtonValue::IndexSelection(index, length) => {
+                *index = wrap_add(*index, 1, *length - 1, 0);
+                self.value_changed = true;
+            }
+            ButtonValue::Enum(value) => {
+                *value = value.next();
+                self.value_changed = true;
+            }
+            ButtonValue::SubButtons(buttons, _) => {
+                if self.selected {
+                    if let Some(button) = buttons.get_mut(self.value_index) {
+                        button.selected = true;
+                    }
+                    self.value_index = wrap_add(self.value_index, 1, buttons.len() - 1, 0);
+                    if let Some(button) = buttons.get_mut(self.value_index) {
+                        button.selected = true;
+                    }
+                }
+            }
+        }
+    }
+    pub fn button_left(&mut self) {
+        match &mut self.value {
+            ButtonValue::Vector2(_) => {
+                if self.selected {
+                    self.value_index = wrap_remove(self.value_index, 1, 1, 0);
+                    self.value_changed = true;
+                }
+            }
+            ButtonValue::Color(_) => {
+                if self.selected {
+                    self.value_index = wrap_remove(self.value_index, 1, 2, 0);
+                    self.value_changed = true;
+                }
+            }
+            ButtonValue::Usize(value) => {
+                *value = wrap_remove(*value, 1, usize::MAX, 0);
+                self.value_changed = true;
+            }
+            ButtonValue::OptionUsize(value) => {
+                if let Some(val) = value {
+                    if *val == 0 {
+                        *value = None;
+                        return;
+                    }
+                    *val -= 1;
+                    self.value_changed = true;
+                }
+            }
+            ButtonValue::I32(value) => {
+                *value = wrap_remove(*value, 1, i32::MAX, i32::MIN);
+                self.value_changed = true;
+            }
+            ButtonValue::Bool(_) => {}
+            ButtonValue::Char(_) => {}
+            ButtonValue::String(_) => {}
+            ButtonValue::StateChange(_) => {}
+            ButtonValue::IndexSelection(index, length) => {
+                *index = wrap_remove(*index, 1, *length - 1, 0);
+                self.value_changed = true;
+            }
+            ButtonValue::Enum(value) => {
+                *value = value.prev();
+                self.value_changed = true;
+            }
+            ButtonValue::SubButtons(buttons, _) => {
+                if self.selected {
+                    if let Some(button) = buttons.get_mut(self.value_index) {
+                        button.selected = true;
+                    }
+                    self.value_index = wrap_remove(self.value_index, 1, buttons.len() - 1, 0);
+                    if let Some(button) = buttons.get_mut(self.value_index) {
+                        button.selected = true;
+                    }
+                }
+            }
+        }
+    }
+    pub fn button_up(&mut self) {
+        match &mut self.value {
+            ButtonValue::Vector2(value) => {
+                if self.selected {
+                    value[self.value_index] =
+                        wrap_add(value[self.value_index], 1, i32::MAX, i32::MIN);
+                    self.value_changed = true;
+                }
+            }
+            ButtonValue::Color(value) => {
+                if self.selected
+                    && let Some(Color::TrueColor { r, g, b }) = value
+                {
+                    match &self.value_index {
+                        0 => *r = wrap_add(*r, 1, u8::MAX, 0),
+                        1 => *g = wrap_add(*g, 1, u8::MAX, 0),
+                        2 => *b = wrap_add(*b, 1, u8::MAX, 0),
+                        _ => {}
+                    }
+                    self.value_changed = true;
+                }
+            }
+            ButtonValue::Usize(_) => {}
+            ButtonValue::OptionUsize(_) => {}
+            ButtonValue::I32(_) => {}
+            ButtonValue::Bool(_) => {}
+            ButtonValue::Char(_) => {}
+            ButtonValue::String(_) => {}
+            ButtonValue::StateChange(_) => {}
+            ButtonValue::IndexSelection(_, _) => {}
+            ButtonValue::Enum(_) => {}
+            ButtonValue::SubButtons(buttons, _) => {
+                if self.selected
+                    && let Some(button) = buttons.get_mut(self.value_index)
+                {
+                    button.button_right();
+                    self.value_changed = true;
+                }
+            }
+        }
+    }
+    pub fn button_down(&mut self) {
+        match &mut self.value {
+            ButtonValue::Vector2(value) => {
+                if self.selected {
+                    value[self.value_index] =
+                        wrap_remove(value[self.value_index], 1, i32::MAX, i32::MIN);
+                    self.value_changed = true;
+                }
+            }
+            ButtonValue::Color(value) => {
+                if self.selected
+                    && let Some(Color::TrueColor { r, g, b }) = value
+                {
+                    match &self.value_index {
+                        0 => *r = wrap_remove(*r, 1, u8::MAX, u8::MIN),
+                        1 => *g = wrap_remove(*g, 1, u8::MAX, u8::MIN),
+                        2 => *b = wrap_remove(*b, 1, u8::MAX, u8::MIN),
+                        _ => {}
+                    }
+                    self.value_changed = true;
+                }
+            }
+            ButtonValue::Usize(_) => {}
+            ButtonValue::OptionUsize(_) => {}
+            ButtonValue::I32(_) => {}
+            ButtonValue::Bool(_) => {}
+            ButtonValue::Char(_) => {}
+            ButtonValue::String(_) => {}
+            ButtonValue::StateChange(_) => {}
+            ButtonValue::IndexSelection(_, _) => {}
+            ButtonValue::Enum(_) => {}
+            ButtonValue::SubButtons(buttons, _) => {
+                if self.selected
+                    && let Some(button) = buttons.get_mut(self.value_index)
+                {
+                    button.button_left();
+                    self.value_changed = true;
+                }
+            }
+        }
+    }
+    pub fn button_char(&mut self, ch: char) {
+        if !self.selected {
+            return;
+        }
+        match &mut self.value {
+            ButtonValue::Char(value) => {
+                *value = ch;
+                self.selected = false;
+                self.value_changed = true;
+            }
+            ButtonValue::String(value) => {
+                value.push(ch);
+                self.value_changed = true;
+            }
+            ButtonValue::SubButtons(buttons, _) => {
+                if self.selected
+                    && let Some(button) = buttons.get_mut(self.value_index)
+                {
+                    button.button_char(ch);
+                    self.value_changed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+pub struct Layout {
+    pub buttons: HashMap<usize, Button>,
+    pub current_button: usize,
+}
+impl Layout {
+    pub fn new() -> Self {
+        Self {
+            buttons: HashMap::new(),
+            current_button: 0,
+        }
+    }
+    pub fn add_button(&mut self, name: String, value: ButtonValue) {
+        if self.buttons.contains_key(&self.buttons.len()) {
+            return;
+        }
+
+        let mut val = value;
+
+        if let ButtonValue::SubButtons(buttons, _) = &mut val {
+            buttons.push(Button::new("Add".to_string(), ButtonValue::Bool(false)));
+            buttons.push(Button::new("Remove".to_string(), ButtonValue::Bool(false)));
+        }
+        self.buttons
+            .insert(self.buttons.len(), Button::new(name, val));
+    }
 }

@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(not(feature = "editor"))]
 use crate::game::GameState;
+#[cfg(feature = "editor")]
+use crate::game_object::GameEvent;
 #[cfg(not(feature = "editor"))]
 use crate::game_object::{COMBAT_SELECTIONS, CombatPhase, GameEvent};
-#[cfg(feature = "editor")]
-use crate::game_object::{GameEvent, event_condition_to_string};
 use crate::map::Map;
 use crate::vector2::Vector2;
 
@@ -111,7 +111,13 @@ impl Renderer {
     }
 
     #[cfg(feature = "editor")]
-    pub fn render_editor(&mut self, state: &EditorState, camera: &Vector2, map: &Map) {
+    pub fn render_editor(
+        &mut self,
+        state: &EditorState,
+        camera: &Vector2,
+        map: &Map,
+        layout: &Layout,
+    ) {
         let mut buffer = String::with_capacity(
             (self.measurements.screen_size.x * self.measurements.screen_size.y * 15) as usize,
         );
@@ -191,693 +197,10 @@ impl Renderer {
                     }
                 }
             }
-            EditorState::EditingObject {
-                object_id,
-                selection,
-                edit_selection,
-                selected,
-            } => {
+            EditorState::Browsing => {
                 for y in 0..self.measurements.screen_size.y {
                     self.render_editor_map_line(state, camera, map, &mut buffer, y);
-                    let mut raw_len = self.measurements.screen_size.x as usize;
-
-                    if (y as usize) < OBJECT_EDIT_SELECTIONS.len() {
-                        let sel_str = OBJECT_EDIT_SELECTIONS[y as usize];
-                        let selection_text = if y as usize == *selection {
-                            sel_str
-                                .custom_color(CustomColor::new(
-                                    if *selected { 255 } else { 127 },
-                                    0,
-                                    0,
-                                ))
-                                .to_string()
-                        } else {
-                            sel_str.to_string()
-                        };
-                        buffer.push_str("  ");
-                        buffer.push_str(&selection_text);
-                        if map.camera_operator == *object_id && y == 4 {
-                            buffer.push_str(" ");
-                            let is_op = if *selection == 4 {
-                                "X".custom_color(CustomColor::new(127, 0, 0)).to_string()
-                            } else {
-                                "X".to_string()
-                            };
-                            buffer.push_str(&is_op);
-                            raw_len += 2;
-                        }
-
-                        raw_len += 2 + sel_str.len();
-
-                        if *selected && y as usize == *selection {
-                            match sel_str {
-                                "Position" => {
-                                    if let Some(object) = map.objects.get(object_id) {
-                                        let pos_text = format!(
-                                            "  x:{} y:{}",
-                                            object.position.x, object.position.y
-                                        );
-                                        raw_len += pos_text.len();
-                                        buffer.push_str(
-                                            &pos_text
-                                                .custom_color(CustomColor::new(255, 255, 0))
-                                                .to_string(),
-                                        );
-                                    }
-                                }
-                                "Color" => {
-                                    if let Some(object) = map.objects.get(object_id) {
-                                        let color = match object.icon.fgcolor {
-                                            Some(Color::TrueColor { r, g, b }) => {
-                                                CustomColor::new(r, g, b)
-                                            }
-                                            _ => CustomColor::new(255, 255, 255),
-                                        };
-
-                                        let r_text = format!("  r:{} ", color.r);
-                                        let g_text = format!("g:{} ", color.g);
-                                        let b_text = format!("b:{}", color.b);
-                                        raw_len += r_text.len() + g_text.len() + b_text.len();
-
-                                        buffer.push_str(
-                                            &r_text
-                                                .custom_color(CustomColor::new(
-                                                    255,
-                                                    if *edit_selection == 0 { 255 } else { 127 },
-                                                    0,
-                                                ))
-                                                .to_string(),
-                                        );
-                                        buffer.push_str(
-                                            &g_text
-                                                .custom_color(CustomColor::new(
-                                                    255,
-                                                    if *edit_selection == 1 { 255 } else { 127 },
-                                                    0,
-                                                ))
-                                                .to_string(),
-                                        );
-                                        buffer.push_str(
-                                            &b_text
-                                                .custom_color(CustomColor::new(
-                                                    255,
-                                                    if *edit_selection == 2 { 255 } else { 127 },
-                                                    0,
-                                                ))
-                                                .to_string(),
-                                        );
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-
-                    self.pad_line(&mut buffer, y as usize, raw_len);
-                    buffer.push_str("\r\n");
-                }
-            }
-            EditorState::SelectingComponent {
-                object_id,
-                selection,
-            } => {
-                for y in 0..self.measurements.screen_size.y {
-                    self.render_editor_map_line(state, camera, map, &mut buffer, y);
-                    let mut raw_len = self.measurements.screen_size.x as usize;
-
-                    if (y as usize) < COMPONENT_SELECTIONS.len() {
-                        let indicator = match COMPONENT_SELECTIONS[y as usize] {
-                            "MoveableComponent" => {
-                                if map.moveable_components.contains_key(object_id) {
-                                    String::from("X")
-                                } else {
-                                    String::new()
-                                }
-                            }
-                            "InputComponent" => {
-                                if map.input_components.contains_key(object_id) {
-                                    String::from("X")
-                                } else {
-                                    String::new()
-                                }
-                            }
-                            "EventComponent" => {
-                                if map.event_components.contains_key(object_id) {
-                                    String::from("X")
-                                } else {
-                                    String::new()
-                                }
-                            }
-                            "StatsComponent" => {
-                                if map.stats_components.contains_key(object_id) {
-                                    String::from("X")
-                                } else {
-                                    String::new()
-                                }
-                            }
-                            _ => String::new(),
-                        };
-                        let sel_str = format!("{} {}", COMPONENT_SELECTIONS[y as usize], indicator);
-
-                        let selection_text = if y as usize == *selection {
-                            sel_str
-                                .custom_color(CustomColor::new(127, 0, 0))
-                                .to_string()
-                        } else {
-                            sel_str.to_string()
-                        };
-                        buffer.push_str("  ");
-                        buffer.push_str(&selection_text);
-                        raw_len += 2 + sel_str.len();
-                    }
-
-                    self.pad_line(&mut buffer, y as usize, raw_len);
-                    buffer.push_str("\r\n");
-                }
-            }
-            EditorState::EditingStatsComponent {
-                object_id,
-                selection,
-            } => {
-                for y in 0..self.measurements.screen_size.y {
-                    self.render_editor_map_line(state, camera, map, &mut buffer, y);
-                    let mut raw_len = self.measurements.screen_size.x as usize;
-
-                    if (y as usize) < STATS_COMPONENT_SELECTIONS.len() {
-                        let value = match STATS_COMPONENT_SELECTIONS[y as usize] {
-                            "strength" => {
-                                if let Some(stats) = map.stats_components.get(object_id) {
-                                    stats.strength.to_string()
-                                } else {
-                                    String::new()
-                                }
-                            }
-                            "agility" => {
-                                if let Some(stats) = map.stats_components.get(object_id) {
-                                    stats.agility.to_string()
-                                } else {
-                                    String::new()
-                                }
-                            }
-                            "defense" => {
-                                if let Some(stats) = map.stats_components.get(object_id) {
-                                    stats.defense.to_string()
-                                } else {
-                                    String::new()
-                                }
-                            }
-                            "luck" => {
-                                if let Some(stats) = map.stats_components.get(object_id) {
-                                    stats.luck.to_string()
-                                } else {
-                                    String::new()
-                                }
-                            }
-                            "max_health" => {
-                                if let Some(stats) = map.stats_components.get(object_id) {
-                                    stats.max_health.to_string()
-                                } else {
-                                    String::new()
-                                }
-                            }
-                            _ => String::new(),
-                        };
-                        let sel_str =
-                            format!("{} {}", STATS_COMPONENT_SELECTIONS[y as usize], value);
-
-                        let selection_text = if y as usize == *selection {
-                            sel_str
-                                .custom_color(CustomColor::new(127, 0, 0))
-                                .to_string()
-                        } else {
-                            sel_str.to_string()
-                        };
-                        buffer.push_str("  ");
-                        buffer.push_str(&selection_text);
-                        raw_len += 2 + sel_str.len();
-                    }
-
-                    self.pad_line(&mut buffer, y as usize, raw_len);
-                    buffer.push_str("\r\n");
-                }
-            }
-            EditorState::EditingMeasurements {
-                selection,
-                selections_selection,
-                selected,
-            } => {
-                for y in 0..self.measurements.screen_size.y {
-                    self.render_editor_map_line(state, camera, map, &mut buffer, y);
-                    let mut raw_len = self.measurements.screen_size.x as usize;
-
-                    if (y as usize) < EDIT_SCREEN_MEASUREMENTS_SELECTIONS.len() {
-                        let selection_text = if y as usize == *selection {
-                            let mut s = EDIT_SCREEN_MEASUREMENTS_SELECTIONS[y as usize]
-                                .custom_color(CustomColor::new(
-                                    if *selected { 255 } else { 127 },
-                                    0,
-                                    0,
-                                ))
-                                .to_string();
-                            if *selected {
-                                s.push_str(&" ");
-                                let highlight = |val: usize| -> String {
-                                    val.to_string()
-                                        .custom_color(CustomColor::new(
-                                            255,
-                                            if *selections_selection == 0 { 255 } else { 127 },
-                                            0,
-                                        ))
-                                        .to_string()
-                                };
-
-                                match EDIT_SCREEN_MEASUREMENTS_SELECTIONS[*selection] {
-                                    "screen_size" => {
-                                        s.push_str(
-                                            &self.measurements.screen_size.to_colored_string(
-                                                CustomColor::new(
-                                                    255,
-                                                    if *selections_selection == 0 {
-                                                        255
-                                                    } else {
-                                                        127
-                                                    },
-                                                    0,
-                                                ),
-                                                CustomColor::new(
-                                                    255,
-                                                    if *selections_selection == 1 {
-                                                        255
-                                                    } else {
-                                                        127
-                                                    },
-                                                    0,
-                                                ),
-                                                CustomColor::new(255, 127, 0),
-                                            ),
-                                        );
-                                    }
-                                    "screen_margins" => {
-                                        s.push_str(
-                                            &self.measurements.screen_margins.to_colored_string(
-                                                CustomColor::new(
-                                                    255,
-                                                    if *selections_selection == 0 {
-                                                        255
-                                                    } else {
-                                                        127
-                                                    },
-                                                    0,
-                                                ),
-                                                CustomColor::new(
-                                                    255,
-                                                    if *selections_selection == 1 {
-                                                        255
-                                                    } else {
-                                                        127
-                                                    },
-                                                    0,
-                                                ),
-                                                CustomColor::new(255, 127, 0),
-                                            ),
-                                        );
-                                    }
-                                    "dialogue_padding" => {
-                                        s.push_str(&highlight(self.measurements.dialogue_padding))
-                                    }
-                                    "dialogue_text_padding" => s.push_str(&highlight(
-                                        self.measurements.dialogue_text_padding,
-                                    )),
-                                    "dialogue_selection_text_padding" => s.push_str(&highlight(
-                                        self.measurements.dialogue_selection_text_padding,
-                                    )),
-                                    "dialogue_max_character_count" => s.push_str(&highlight(
-                                        self.measurements.dialogue_max_character_count,
-                                    )),
-                                    "combat_character_padding_y" => s.push_str(&highlight(
-                                        self.measurements.combat_character_padding_y,
-                                    )),
-                                    "combat_character_padding_x" => s.push_str(&highlight(
-                                        self.measurements.combat_character_padding_x,
-                                    )),
-                                    "combat_characters_distance" => s.push_str(&highlight(
-                                        self.measurements.combat_characters_distance,
-                                    )),
-                                    "combat_separator_padding_y" => s.push_str(&highlight(
-                                        self.measurements.combat_separator_padding_y,
-                                    )),
-                                    "combat_selection_separator_padding" => s.push_str(&highlight(
-                                        self.measurements.combat_selection_separator_padding,
-                                    )),
-                                    "combat_health_padding_y" => s.push_str(&highlight(
-                                        self.measurements.combat_health_padding_y,
-                                    )),
-                                    _ => {}
-                                }
-                            }
-                            s
-                        } else {
-                            EDIT_SCREEN_MEASUREMENTS_SELECTIONS[y as usize].to_string()
-                        };
-                        buffer.push_str("  ");
-                        buffer.push_str(&selection_text);
-                        raw_len += 2 + selection_text.len();
-                    }
-
-                    self.pad_line(&mut buffer, y as usize, raw_len);
-                    buffer.push_str("\r\n");
-                }
-            }
-            EditorState::EditingEventComponent {
-                object_id,
-                current_step,
-                selection,
-            } => {
-                for y in 0..self.measurements.screen_size.y {
-                    self.render_editor_map_line(state, camera, map, &mut buffer, y);
-                    let mut raw_len = self.measurements.screen_size.x as usize;
-                    buffer.push_str("  ");
-                    raw_len += 2;
-
-                    let Some(event_comp) = map.event_components.get(object_id) else {
-                        break;
-                    };
-                    match &y {
-                        0 => {
-                            let str: String =
-                                format!("({}/{})", current_step + 1, event_comp.events.len());
-                            raw_len += str.len();
-                            let colored;
-                            let to_push: &str = if *selection == (y as usize) {
-                                colored = str.custom_color(CustomColor::new(255, 0, 0)).to_string();
-                                &colored
-                            } else {
-                                &str
-                            };
-                            buffer.push_str(to_push);
-                        }
-                        1 => {
-                            let mut str: String = String::from("Event : ");
-                            match &event_comp.events[*current_step].event {
-                                GameEvent::None => {
-                                    str = format!("{}None", str);
-                                }
-                                GameEvent::Dialogue(dialogue) => {
-                                    str = format!("{}Dialogue", str);
-                                }
-                                GameEvent::Combat(combat) => {
-                                    str = format!("{}Combat", str);
-                                }
-                                GameEvent::TriggerObjectEvent(id) => {
-                                    str = format!("{}TriggerObjectEvent", str);
-                                }
-                            }
-
-                            let colored;
-                            let to_push: &str = if *selection == (y as usize) {
-                                colored = str.custom_color(CustomColor::new(255, 0, 0)).to_string();
-                                &colored
-                            } else {
-                                &str
-                            };
-                            raw_len += str.len();
-                            buffer.push_str(to_push);
-                        }
-                        2 => {
-                            let str = &format!(
-                                "Event requirement = {}",
-                                event_condition_to_string(
-                                    &event_comp.events[*current_step].requirement
-                                )
-                            );
-                            raw_len += str.len();
-                            let colored;
-                            let to_push: &str = if *selection == (y as usize) {
-                                colored = str.custom_color(CustomColor::new(255, 0, 0)).to_string();
-                                &colored
-                            } else {
-                                &str
-                            };
-                            buffer.push_str(to_push);
-                        }
-                        3 => {
-                            let str = &format!(
-                                "Repeat if requirement is not met = {}",
-                                event_comp.events[*current_step].repeat
-                            );
-                            raw_len += str.len();
-                            let colored;
-                            let to_push: &str = if *selection == (y as usize) {
-                                colored = str.custom_color(CustomColor::new(255, 0, 0)).to_string();
-                                &colored
-                            } else {
-                                &str
-                            };
-                            buffer.push_str(to_push);
-                        }
-                        4 => {
-                            let str = &format!(
-                                "Next Event ID = {}",
-                                event_comp.events[*current_step]
-                                    .next_event
-                                    .map(|id| id.to_string())
-                                    .unwrap_or_else(|| "None".to_string())
-                            );
-                            raw_len += str.len();
-                            let colored;
-                            let to_push: &str = if *selection == (y as usize) {
-                                colored = str.custom_color(CustomColor::new(255, 0, 0)).to_string();
-                                &colored
-                            } else {
-                                &str
-                            };
-                            buffer.push_str(to_push);
-                        }
-                        _ => {}
-                    }
-
-                    self.pad_line(&mut buffer, y as usize, raw_len);
-                    buffer.push_str("\r\n");
-                }
-            }
-            EditorState::EditingEvent {
-                object_id,
-                current_step,
-                selection,
-                editing_selection,
-                selections_selection,
-            } => {
-                for y in 0..self.measurements.screen_size.y {
-                    self.render_editor_map_line(state, camera, map, &mut buffer, y);
-                    let mut raw_len = self.measurements.screen_size.x as usize;
-                    buffer.push_str("  ");
-                    raw_len += 2;
-
-                    let Some(event_comp) = map.event_components.get(object_id) else {
-                        self.pad_line(&mut buffer, y as usize, raw_len);
-                        buffer.push_str("\r\n");
-                        continue;
-                    };
-                    let step = &event_comp.events[*current_step];
-
-                    let highlight = |text: String, raw_len: &mut usize| -> String {
-                        *raw_len += text.len();
-                        if *selection == y as usize {
-                            text.custom_color(CustomColor::new(127, 0, 0)).to_string()
-                        } else {
-                            text
-                        }
-                    };
-
-                    match &step.event {
-                        GameEvent::Dialogue(dialogue) => match y {
-                            0 => {
-                                buffer.push_str(&highlight(
-                                    format!("Text: {}", dialogue.text),
-                                    &mut raw_len,
-                                ));
-                            }
-                            1 => {
-                                if dialogue.selections.is_empty() {
-                                    buffer.push_str(&highlight(
-                                        "Add Selections".to_string(),
-                                        &mut raw_len,
-                                    ));
-                                } else {
-                                    let text = dialogue
-                                        .selections
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, sel)| {
-                                            let s = format!("Selection {}: {}  ", i, sel);
-                                            if *editing_selection
-                                                && *selections_selection == i
-                                                && *selection == y as usize
-                                            {
-                                                s.custom_color(CustomColor::new(255, 255, 0))
-                                                    .to_string()
-                                            } else if *selection == y as usize {
-                                                s.custom_color(CustomColor::new(127, 0, 0))
-                                                    .to_string()
-                                            } else {
-                                                s
-                                            }
-                                        })
-                                        .collect::<String>();
-                                    buffer.push_str(&text);
-                                    raw_len += text.len();
-                                }
-                            }
-                            2 => {
-                                if dialogue.selections_pointing_event.is_empty() {
-                                    buffer.push_str(&highlight(
-                                        "Add Selections pointing events".to_string(),
-                                        &mut raw_len,
-                                    ));
-                                } else {
-                                    let text = dialogue
-                                        .selections_pointing_event
-                                        .iter()
-                                        .enumerate()
-                                        .map(|(i, points_to)| {
-                                            let s = format!(
-                                                "Selection {} points to: {}  ",
-                                                i,
-                                                points_to
-                                                    .map_or("None".to_string(), |v| v.to_string())
-                                            );
-                                            if *editing_selection
-                                                && *selections_selection == i
-                                                && *selection == y as usize
-                                            {
-                                                s.custom_color(CustomColor::new(255, 255, 0))
-                                                    .to_string()
-                                            } else if *selection == y as usize {
-                                                s.custom_color(CustomColor::new(127, 0, 0))
-                                                    .to_string()
-                                            } else {
-                                                s
-                                            }
-                                        })
-                                        .collect::<String>();
-                                    buffer.push_str(&text);
-                                    raw_len += text.len();
-                                }
-                            }
-                            _ => {}
-                        },
-                        GameEvent::Combat(combat) => match y {
-                            0 => {
-                                buffer.push_str(&highlight(
-                                    format!("Player goes first: {}", combat.player_goes_first),
-                                    &mut raw_len,
-                                ));
-                            }
-                            1 => {
-                                buffer.push_str(&highlight(
-                                    format!("Turn result time: {}", combat.turn_result_time),
-                                    &mut raw_len,
-                                ));
-                            }
-                            2 => {
-                                buffer.push_str(&highlight(
-                                    format!("Proj icon: {}", combat.projectile_icon.input),
-                                    &mut raw_len,
-                                ));
-                            }
-                            3 => {
-                                buffer
-                                    .push_str(&highlight("Proj color:".to_string(), &mut raw_len));
-
-                                if *selection == y as usize && *editing_selection {
-                                    let color = match combat.projectile_icon.fgcolor {
-                                        Some(Color::TrueColor { r, g, b }) => {
-                                            CustomColor::new(r, g, b)
-                                        }
-                                        _ => CustomColor::new(122, 122, 122),
-                                    };
-
-                                    let r_text = format!("  r:{} ", color.r);
-                                    let g_text = format!("g:{} ", color.g);
-                                    let b_text = format!("b:{}", color.b);
-                                    raw_len += r_text.len() + g_text.len() + b_text.len();
-
-                                    buffer.push_str(
-                                        &r_text
-                                            .custom_color(CustomColor::new(
-                                                255,
-                                                if *selections_selection == 0 { 255 } else { 127 },
-                                                0,
-                                            ))
-                                            .to_string(),
-                                    );
-                                    buffer.push_str(
-                                        &g_text
-                                            .custom_color(CustomColor::new(
-                                                255,
-                                                if *selections_selection == 1 { 255 } else { 127 },
-                                                0,
-                                            ))
-                                            .to_string(),
-                                    );
-                                    buffer.push_str(
-                                        &b_text
-                                            .custom_color(CustomColor::new(
-                                                255,
-                                                if *selections_selection == 2 { 255 } else { 127 },
-                                                0,
-                                            ))
-                                            .to_string(),
-                                    );
-                                }
-                            }
-                            4 => {
-                                buffer.push_str(&highlight(
-                                    format!("Proj damage: {}", combat.projectile_damage),
-                                    &mut raw_len,
-                                ));
-                            }
-                            5 => {
-                                buffer.push_str(&highlight(
-                                    format!("Proj count: {}", combat.projectile_count),
-                                    &mut raw_len,
-                                ));
-                            }
-                            6 => {
-                                buffer.push_str(&highlight(
-                                    format!("Proj move time: {}", combat.projectile_move_time),
-                                    &mut raw_len,
-                                ));
-                            }
-                            7 => {
-                                buffer.push_str(&highlight(
-                                    format!("Proj spawn time: {}", combat.projectile_spawn_time),
-                                    &mut raw_len,
-                                ));
-                            }
-                            8 => {
-                                buffer.push_str(&highlight(
-                                    format!(
-                                        "Delete when defeated: {}",
-                                        combat.delete_when_defeated
-                                    ),
-                                    &mut raw_len,
-                                ));
-                            }
-                            _ => {}
-                        },
-                        GameEvent::TriggerObjectEvent(id) => match y {
-                            0 => {
-                                buffer.push_str(&highlight(
-                                    format!("Target ID: {}", id),
-                                    &mut raw_len,
-                                ));
-                            }
-                            _ => {}
-                        },
-                        GameEvent::None => {}
-                    }
-
+                    let raw_len = self.measurements.screen_size.x as usize;
                     self.pad_line(&mut buffer, y as usize, raw_len);
                     buffer.push_str("\r\n");
                 }
@@ -885,7 +208,21 @@ impl Renderer {
             _ => {
                 for y in 0..self.measurements.screen_size.y {
                     self.render_editor_map_line(state, camera, map, &mut buffer, y);
-                    let raw_len = self.measurements.screen_size.x as usize;
+                    buffer.push_str("  ");
+                    let mut raw_len = self.measurements.screen_size.x as usize + 2;
+
+                    if let Some(button) = layout.buttons.get(&(y as usize)) {
+                        self.render_button(
+                            &mut buffer,
+                            &mut raw_len,
+                            button,
+                            y as usize,
+                            layout.current_button,
+                            255,
+                            127,
+                        );
+                    }
+
                     self.pad_line(&mut buffer, y as usize, raw_len);
                     buffer.push_str("\r\n");
                 }
@@ -910,6 +247,203 @@ impl Renderer {
     }
 
     #[cfg(feature = "editor")]
+    fn render_button(
+        &self,
+        buffer: &mut String,
+        raw_len: &mut usize,
+        button: &Button,
+        y: usize,
+        current_button: usize,
+        highlight_color_1: u8,
+        highlight_color_2: u8,
+    ) {
+        *raw_len += button.name.len();
+
+        let colored_name;
+        buffer.push_str(if y == current_button {
+            colored_name = button
+                .name
+                .custom_color(CustomColor::new(
+                    if button.selected {
+                        highlight_color_1
+                    } else {
+                        highlight_color_2
+                    },
+                    0,
+                    0,
+                ))
+                .to_string();
+            &colored_name
+        } else {
+            &button.name
+        });
+        let mut current_str = String::new();
+        match &button.value {
+            ButtonValue::Bool(value) => {
+                current_str.push_str("  ");
+                if *value {
+                    current_str.push_str("X");
+                }
+            }
+            ButtonValue::Usize(value) => {
+                current_str.push_str("  ");
+                current_str.push_str(&value.to_string());
+            }
+            ButtonValue::OptionUsize(value) => {
+                current_str.push_str("  ");
+                if let Some(u) = value {
+                    current_str.push_str(&u.to_string());
+                } else {
+                    current_str.push_str("None");
+                }
+            }
+            ButtonValue::IndexSelection(index, length) => {
+                current_str.push_str(&format!("({}/{})", index + 1, length));
+            }
+            ButtonValue::Enum(value) => {
+                current_str.push_str("  ");
+                current_str.push_str(value.name());
+            }
+            ButtonValue::String(value) => {
+                current_str.push_str("  ");
+                current_str.push_str(value);
+            }
+            ButtonValue::SubButtons(buttons, _) => {
+                for (i, b) in buttons.iter().enumerate() {
+                    buffer.push(' ');
+                    *raw_len += 1;
+                    if i as i32 <= (buttons.len() as i32) - 3 {
+                        if y == current_button {
+                            buffer.push_str(
+                                &i.to_string()
+                                    .custom_color(CustomColor::new(
+                                        if i == button.value_index && button.selected {
+                                            highlight_color_1
+                                        } else {
+                                            highlight_color_2
+                                        },
+                                        0,
+                                        0,
+                                    ))
+                                    .to_string(),
+                            );
+                        } else {
+                            buffer.push_str(&i.to_string());
+                        }
+                        *raw_len += 1;
+                    }
+                    if i == button.value_index {
+                        self.render_button(
+                            buffer,
+                            raw_len,
+                            b,
+                            y as usize,
+                            current_button,
+                            255,
+                            127,
+                        );
+                    } else {
+                        self.render_button(
+                            buffer,
+                            raw_len,
+                            b,
+                            y as usize,
+                            current_button,
+                            127,
+                            127,
+                        );
+                    }
+                    buffer.push(' ');
+                    *raw_len += 1;
+                }
+            }
+            _ => {}
+        }
+        *raw_len += current_str.len();
+        if y as usize == current_button {
+            buffer.push_str(
+                &current_str
+                    .custom_color(CustomColor::new(
+                        if button.selected {
+                            highlight_color_1
+                        } else {
+                            highlight_color_2
+                        },
+                        0,
+                        0,
+                    ))
+                    .to_string(),
+            );
+        } else {
+            buffer.push_str(&current_str);
+        }
+
+        if y as usize == current_button && button.selected {
+            match &button.value {
+                ButtonValue::Bool(_) => {}
+                ButtonValue::Color(value) => {
+                    let color = match value {
+                        Some(Color::TrueColor { r, g, b }) => CustomColor::new(*r, *g, *b),
+                        _ => CustomColor::new(255, 255, 255),
+                    };
+
+                    let r_text = format!("  (r:{} ", color.r);
+                    let g_text = format!("g:{} ", color.g);
+                    let b_text = format!("b:{})", color.b);
+                    *raw_len += r_text.len() + g_text.len() + b_text.len();
+
+                    buffer.push_str(
+                        &r_text
+                            .custom_color(CustomColor::new(
+                                255,
+                                if button.value_index == 0 { 255 } else { 127 },
+                                0,
+                            ))
+                            .to_string(),
+                    );
+                    buffer.push_str(
+                        &g_text
+                            .custom_color(CustomColor::new(
+                                255,
+                                if button.value_index == 1 { 255 } else { 127 },
+                                0,
+                            ))
+                            .to_string(),
+                    );
+                    buffer.push_str(
+                        &b_text
+                            .custom_color(CustomColor::new(
+                                255,
+                                if button.value_index == 2 { 255 } else { 127 },
+                                0,
+                            ))
+                            .to_string(),
+                    );
+                }
+                ButtonValue::I32(_) => {}
+                ButtonValue::StateChange(_) => {}
+                ButtonValue::Usize(_) => {}
+                ButtonValue::OptionUsize(_) => {}
+                ButtonValue::Vector2(value) => {
+                    buffer.push_str("  ");
+                    let value_text = value.to_colored_string(
+                        CustomColor::new(255, if button.value_index == 0 { 255 } else { 127 }, 0),
+                        CustomColor::new(255, if button.value_index == 1 { 255 } else { 127 }, 0),
+                        CustomColor::new(255, if button.value_index == 2 { 255 } else { 127 }, 0),
+                    );
+                    buffer.push_str(&value_text);
+                    *raw_len += value_text.len() + 2;
+                }
+                ButtonValue::Char(_) => {}
+                ButtonValue::String(_) => {}
+                ButtonValue::IndexSelection(_, _) => {}
+                ButtonValue::Enum(_) => {}
+                ButtonValue::SubButtons(buttons, _) => {}
+            }
+        }
+    }
+
+    #[cfg(feature = "editor")]
     fn render_editor_map_line(
         &self,
         state: &EditorState,
@@ -918,11 +452,7 @@ impl Renderer {
         buffer: &mut String,
         y: i32,
     ) {
-        let cursor_screen_pos = if let EditorState::Browsing { cursor } = &state {
-            Some(cursor)
-        } else {
-            None
-        };
+        let cursor_screen_pos = self.measurements.screen_size / 2;
 
         for x in 0..self.measurements.screen_size.x {
             let current_point = get_point_from_world_to_screen(&camera, &Vector2::new(x, y));
@@ -935,7 +465,7 @@ impl Renderer {
                 && let Some(object) = map.objects.get(id)
             {
                 buffer.push_str(&object.icon.to_string());
-            } else if cursor_screen_pos.is_some_and(|c| c.x == x && c.y == y) {
+            } else if cursor_screen_pos.x == x && cursor_screen_pos.y == y {
                 buffer.push_str(&" ".on_white().to_string());
             } else {
                 buffer.push_str(&map.ground_icon.to_string());

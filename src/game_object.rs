@@ -65,7 +65,7 @@ impl StatsComponent {
         return base + bonus;
     }
 }
-
+#[derive(Clone)]
 pub struct Dialogue {
     pub text: String,
     pub selections: Vec<String>,
@@ -90,12 +90,13 @@ impl Dialogue {
 }
 
 pub const COMBAT_SELECTIONS: &[&str] = &["Fight", "Item", "Run"];
-
+#[derive(Clone)]
 pub enum TurnResult {
     WasPlayersTurn,
     WasEnemiesTurn,
     CombatEnded,
 }
+#[derive(Clone)]
 pub enum CombatPhase {
     PlayerTurn,
     EnemyAttack(EnemyAttack),
@@ -133,7 +134,7 @@ pub struct Projectile {
     pub row: usize,
     pub damage: usize,
 }
-
+#[derive(Clone)]
 pub struct Combat {
     pub current_selection: usize,
     pub current_phase: CombatPhase,
@@ -186,62 +187,12 @@ impl Combat {
     }
 }
 
+#[derive(Clone)]
 pub enum GameEvent {
     None,
     Dialogue(Dialogue),
     Combat(Combat),
     TriggerObjectEvent(GameObjectID),
-}
-impl GameEvent {
-    pub fn next(&self) -> Self {
-        match self {
-            GameEvent::None => GameEvent::Dialogue(Dialogue::new(String::new(), vec![], vec![], 0)),
-            GameEvent::Dialogue(_) => GameEvent::Combat(Combat::new(
-                CombatPhase::PlayerTurn,
-                false,
-                false,
-                1,
-                "#".custom_color(CustomColor::new(255, 255, 255)),
-                1,
-                1,
-                1,
-                1,
-                false,
-            )),
-            GameEvent::Combat(_) => GameEvent::TriggerObjectEvent(0),
-            GameEvent::TriggerObjectEvent(_) => GameEvent::None,
-        }
-    }
-    pub fn prev(&self) -> Self {
-        match self {
-            GameEvent::None => GameEvent::TriggerObjectEvent(0),
-            GameEvent::Dialogue(_) => GameEvent::None,
-            GameEvent::Combat(_) => {
-                GameEvent::Dialogue(Dialogue::new(String::new(), vec![], vec![], 0))
-            }
-            GameEvent::TriggerObjectEvent(_) => GameEvent::Combat(Combat::new(
-                CombatPhase::PlayerTurn,
-                false,
-                false,
-                1,
-                "#".custom_color(CustomColor::new(255, 255, 255)),
-                1,
-                1,
-                1,
-                1,
-                false,
-            )),
-        }
-    }
-}
-
-pub fn game_event_to_string(game_event: &GameEvent) -> String {
-    match game_event {
-        GameEvent::None => "None".to_string(),
-        GameEvent::Dialogue(_) => "Dialogue".to_string(),
-        GameEvent::Combat(_) => "Combat".to_string(),
-        GameEvent::TriggerObjectEvent(id) => format!("TriggerObjectEvent({})", id),
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -293,6 +244,14 @@ impl EventStep {
 pub struct EventComponent {
     pub events: Vec<EventStep>,
     pub current_index: usize,
+}
+impl EventComponent {
+    pub fn new(events: Vec<EventStep>) -> Self {
+        Self {
+            events,
+            current_index: 0,
+        }
+    }
 }
 pub struct GameObject {
     pub id: GameObjectID,

@@ -1,5 +1,5 @@
 use std::fmt;
-use std::ops::{Add, Div};
+use std::ops::{Add, Div, Index, IndexMut};
 
 use colored::{Colorize, CustomColor};
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,36 @@ impl Vector2 {
         )
     }
 }
+impl Index<usize> for Vector2 {
+    type Output = i32;
+    fn index(&self, index: usize) -> &Self::Output {
+        match index {
+            0 => &self.x,
+            1 => &self.y,
+            _ => panic!("Index out of bounds"),
+        }
+    }
+}
+impl IndexMut<usize> for Vector2 {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        match index {
+            0 => &mut self.x,
+            1 => &mut self.y,
+            _ => panic!("Index out of bounds"),
+        }
+    }
+}
 impl Div<i32> for &Vector2 {
+    type Output = Vector2;
+
+    fn div(self, other: i32) -> Self::Output {
+        Vector2 {
+            x: self.x / other,
+            y: self.y / other,
+        }
+    }
+}
+impl Div<i32> for Vector2 {
     type Output = Vector2;
 
     fn div(self, other: i32) -> Self::Output {
