@@ -1,6 +1,7 @@
 use crate::{
     game_object::{
-        EventCondition, GameEvent, GameObjectID, InputComponent, MoveableComponent, StatsComponent,
+        Combat, CombatPhase, Dialogue, EventComponent, EventCondition, EventStep, GameEvent,
+        GameObjectID, InputComponent, MoveableComponent, StatsComponent,
     },
     map::Map,
     renderer::ScreenMeasurements,
@@ -65,6 +66,8 @@ pub struct CombatData {
     pub player_goes_first: bool,
     pub turn_order_decided: bool,
     pub turn_result_time: usize,
+    pub projectile_icon: String,
+    pub projectile_icon_color: ColorData,
     pub projectile_damage: usize,
     pub projectile_count: usize,
     pub projectile_move_time: usize,
@@ -163,7 +166,8 @@ pub fn data_to_map(data: &MapData) -> Map {
     );
     map.camera_operator = data.camera_operator;
     data.objects.iter().for_each(|(&id, obj)| {
-        map.insert_object(
+        map.insert_object_with_id(
+            id,
             obj.position,
             obj.icon.custom_color(data_to_color(&obj.icon_color)),
         );
@@ -176,6 +180,45 @@ pub fn data_to_map(data: &MapData) -> Map {
     });
     data.stats_components.iter().for_each(|(&id, s)| {
         map.insert_stats_component(id, s.clone());
+    });
+    data.event_components.iter().for_each(|(&id, ec)| {
+        let events = ec
+            .events
+            .iter()
+            .map(|step| EventStep {
+                event: match &step.event {
+                    GameEventData::None => GameEvent::None,
+                    GameEventData::Dialogue(d) => GameEvent::Dialogue(Dialogue::new(
+                        d.text.clone(),
+                        d.selections.clone(),
+                        d.selections_pointing_event.clone(),
+                        d.current_selection,
+                    )),
+                    GameEventData::Combat(c) => GameEvent::Combat(Combat::new(
+                        CombatPhase::PlayerTurn,
+                        c.player_goes_first,
+                        c.turn_order_decided,
+                        c.turn_result_time,
+                        c.projectile_icon
+                            .custom_color(data_to_color(&c.projectile_icon_color)),
+                        c.projectile_damage,
+                        c.projectile_count,
+                        c.projectile_move_time,
+                        c.projectile_spawn_time,
+                        false,
+                    )),
+                    GameEventData::TriggerObjectEvent(id) => GameEvent::TriggerObjectEvent(*id),
+                },
+                requirement: step.requirement.clone(),
+                repeat: step.repeat,
+                is_triggered: step.is_triggered,
+                next_event: step.next_event,
+            })
+            .collect();
+
+        let mut ec_runtime = EventComponent::new(events);
+        ec_runtime.current_index = ec.current_index;
+        map.event_components.insert(id, ec_runtime);
     });
 
     return map;
@@ -239,6 +282,19 @@ pub fn map_to_data(map: &Map) -> MapData {
                                     projectile_count: c.projectile_count,
                                     projectile_move_time: c.projectile_move_time,
                                     projectile_spawn_time: c.projectile_spawn_time,
+                                    projectile_icon: c.projectile_icon.input.clone(),
+                                    projectile_icon_color: match &c.projectile_icon.fgcolor {
+                                        Some(Color::TrueColor { r, g, b }) => ColorData {
+                                            r: *r,
+                                            g: *g,
+                                            b: *b,
+                                        },
+                                        _ => ColorData {
+                                            r: 255,
+                                            g: 255,
+                                            b: 255,
+                                        },
+                                    },
                                 }),
                                 GameEvent::TriggerObjectEvent(id) => {
                                     GameEventData::TriggerObjectEvent(*id)

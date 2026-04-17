@@ -1427,6 +1427,12 @@ impl Button {
             ButtonValue::Vector2(_) => {
                 self.selected = false;
             }
+            ButtonValue::String(value) => {
+                if self.selected {
+                    value.pop();
+                    self.value_changed = true;
+                }
+            }
             _ => {}
         }
     }

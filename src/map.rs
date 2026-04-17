@@ -65,6 +65,24 @@ impl Map {
         self.objects.insert(id, object);
         return Some(id);
     }
+    pub fn insert_object_with_id(
+        &mut self,
+        id: GameObjectID,
+        position: Vector2,
+        icon: ColoredString,
+    ) -> Option<GameObjectID> {
+        if self.positions_hashmap.contains_key(&position) {
+            println!("{} coordinate is already occupied!", position);
+            return None;
+        }
+        let object = GameObject { id, icon, position };
+        self.positions_hashmap.insert(object.position, object.id);
+        self.objects.insert(id, object);
+        if id >= self.next_id {
+            self.next_id = id + 1;
+        }
+        return Some(id);
+    }
 
     pub fn insert_moveable_component(&mut self, id: GameObjectID) {
         Self::insert_component(MoveableComponent, &mut self.moveable_components, id);
